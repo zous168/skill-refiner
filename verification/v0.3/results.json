@@ -1,0 +1,426 @@
+{
+  "version": "0.3.0",
+  "verified_at": "2026-10-18T04:14:11.044292+00:00",
+  "main_creation_status": "created",
+  "refinement_status": "unchanged",
+  "development_cases": 5,
+  "acceptance_cases": 6,
+  "primary_evaluations": 22,
+  "primary_native_evaluation_children": 11,
+  "independent_business_probes": 27,
+  "unit_and_integration_tests": 45,
+  "fault_loop_rounds": 2,
+  "fault_code_repair_rounds": 1,
+  "fault_evaluations": 34,
+  "fault_role_calls": 4,
+  "unique_python_observation_records": 118,
+  "fault_unique_python_observation_records": 186,
+  "unverified": [
+    "Cursor authenticated execution",
+    "Live custom-model endpoint",
+    "External-service business integrations"
+  ],
+  "qualification": "Business analysis, authoring and autonomous reviewed suites originate in live-create-6; live-create-7-resumed preserves those frozen artifacts and reruns every verdict under corrected controller code. The fault test is a separately declared defect in a copy of the accepted Skill, not an autonomous draft defect.",
+  "fault_baseline_qualification": {
+    "codex": "Correct invocation returned unchanged inventory, reproducing the declared business defect.",
+    "native-child": "Extra argument caused valid contract rejection; FAIL is not proof of the injected defect."
+  },
+  "fault_execution_scope": "A supplemental harness calls production Agent, apply_changes, standards_review and Matrix against the real frozen suites; this is not another fresh CLI creation or planning run.",
+  "evidence_scope": "Portable summary of locally recorded verification. Complete raw archives are not included in Git.",
+  "main_matrix": [
+    {
+      "phase": "baseline",
+      "executor": "codex",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "codex",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "codex",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "codex",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "codex",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "native-child",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "native-child",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "native-child",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "native-child",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "baseline",
+      "executor": "native-child",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "codex",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "codex",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "codex",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "codex",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "codex",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "native-child",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "native-child",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "native-child",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "native-child",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "regression",
+      "executor": "native-child",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "allocate-unicode-and-duplicates",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "empty-and-exact-stock",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "atomic-rejection",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "validation-before-availability",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "strict-document-and-file-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "codex",
+      "case": "invalid-container-and-value-types",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "allocate-unicode-and-duplicates",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "empty-and-exact-stock",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "atomic-rejection",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "validation-before-availability",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "strict-document-and-file-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "executor": "native-child",
+      "case": "invalid-container-and-value-types",
+      "status": "PASS"
+    }
+  ],
+  "main_regression_reuses_successful_baseline": true,
+  "fault_matrix": [
+    {
+      "phase": "round-1/regression",
+      "engine": "codex",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "codex",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "codex",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "codex",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "codex",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "native-child",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "native-child",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "native-child",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "native-child",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-1/regression",
+      "engine": "native-child",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "codex",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "codex",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "codex",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "codex",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "codex",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "native-child",
+      "case": "allocate-merged-unicode",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "native-child",
+      "case": "empty-exact-and-atomic",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "native-child",
+      "case": "schema-and-validation-priority",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "native-child",
+      "case": "reading-decoding-and-json-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "round-2/regression",
+      "engine": "native-child",
+      "case": "invalid-argument-count",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "allocate-unicode-and-duplicates",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "empty-and-exact-stock",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "atomic-rejection",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "validation-before-availability",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "strict-document-and-file-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "codex",
+      "case": "invalid-container-and-value-types",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "allocate-unicode-and-duplicates",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "empty-and-exact-stock",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "atomic-rejection",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "validation-before-availability",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "strict-document-and-file-errors",
+      "status": "PASS"
+    },
+    {
+      "phase": "acceptance",
+      "engine": "native-child",
+      "case": "invalid-container-and-value-types",
+      "status": "PASS"
+    }
+  ],
+  "fault_followup_qualification": "Both first-round development matrices passed. The repairer still reported the prior extra-argument execution as unresolved. A second repair-role call returned no source changes and no unresolved issues, followed by another complete frozen development matrix and acceptance.",
+  "source_artifact_sha256": {
+    "feature-verification.json": "d7d405dd5876d65301ce2dfda0c5eb3b139e36d98d71d2b7f5b10e550787c832",
+    "live-verification.json": "5922305713e089508963e075106a4111c64a4ded5feb693bbf227f703638ad40",
+    "live-fault-regression/independent-verification.json": "2fc1da328616d49b2337f52fb5f80dc2d237b261775985b9863322f78fee065d",
+    "raw-index.json": "7a532239f81a8b9c3ab0fe10d19a3f59ab21c267addfaffdda5ed55ee92fbd19"
+  }
+}

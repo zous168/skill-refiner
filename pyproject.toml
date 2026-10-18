@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-refiner"
+version = "0.3.0"
+description = "Evidence-driven Agent Skill planning, repair and regression using skill-up"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6,<7", "jsonschema>=4.20,<5"]
+
+[project.scripts]
+skill-refiner = "refiner.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["skill-refiner/scripts"]
+

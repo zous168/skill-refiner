@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "agents": {
+    "planning": {"backend": "codex", "model": "gpt-6.1-sol"},
+    "creation": {"backend": "codex_subagent", "model": "gpt-6.1-sol"},
+    "repair": {"backend": "codex_subagent", "model": "gpt-6.1-sol"},
+    "review": {"backend": "codex", "model": "gpt-6.1-sol"}
+  },
+  "executors": [
+    {"id": "codex", "backend": "codex", "model": "gpt-6.1-sol"},
+    {"id": "native-child", "backend": "codex_subagent", "model": "gpt-6.1-sol"}
+  ]
+}

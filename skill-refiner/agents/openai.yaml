@@ -1,0 +1,8 @@
+interface:
+  display_name: "Skill Refiner"
+  short_description: "从业务需求创建 Skill，或改进已有 Skill，自动规划场景、修复并做多引擎回归"
+  default_prompt: "用 $skill-refiner 根据我的业务需求创建或改进 Skill，自主分析流程、编写实现、规划正常边界异常测试，修复优化并完成多引擎回归与独立验收，保留证据。"
+
+policy:
+  allow_implicit_invocation: true
+

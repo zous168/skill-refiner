@@ -1,0 +1,14 @@
+.venv/
+.tools/
+.refiner-runs/
+__pycache__/
+*.egg-info/
+*.pyc
+.DS_Store
+.env
+.env.*
+!.env.example
+build/
+dist/
+.pytest_cache/
+

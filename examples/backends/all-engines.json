@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "agents": {
+    "planning": {"backend": "codex"},
+    "creation": {"backend": "codex_subagent"},
+    "repair": {"backend": "codex_subagent"},
+    "review": {"backend": "codex"}
+  },
+  "executors": [
+    {"id": "codex", "backend": "codex"},
+    {"id": "cursor", "backend": "cursor"},
+    {"id": "native-child", "backend": "codex_subagent"},
+    {"id": "custom-model", "backend": "openai_compatible", "base_url": "http://localhost:11434/v1", "model": "replace-with-your-model", "max_turns": 12}
+  ]
+}
