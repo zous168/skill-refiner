@@ -31,8 +31,56 @@ python3 -m venv .venv
 
 Bootstrap downloads the pinned skill-up v0.13.0 release, verifies the archive against
 upstream checksums and installs it under `.tools/`. It does not change global tools.
-Codex must be installed and authenticated (`codex login status`). Evaluation can
-also use `--engine claude_code` with its existing local authentication.
+This default CLI profile uses Codex and therefore needs an authenticated Codex CLI.
+For other agents and models, supply an explicit backend config as described below.
+
+### Install into another agent
+
+`skill-refiner/SKILL.md` follows the Agent Skills folder format, so the host agent
+does not have to be Codex. Install it into the skill directory your agent reads;
+for example, Cursor supports `.cursor/skills` and `.agents/skills`, Claude Code
+supports `.claude/skills`, and Codex supports `~/.codex/skills`.
+
+See the
+[Cursor skill locations](https://cursor.com/help/customization/skills),
+[Claude Code skill locations](https://code.claude.com/docs/en/skills), or
+[Codex skill locations](https://developers.openai.com/cookbook/examples/codex/iterating-development-workflows-with-codex)
+for the host-specific paths and discovery behavior.
+
+For a complete installation, let the generic installer place the Skill directly
+in the chosen host's folder and configure its isolated runtime. Choose the
+planning, creation, repair, review and evaluation backends in `backends.json`;
+this does not install or assume Codex or any other specific agent:
+
+```sh
+git clone https://github.com/zous168/skill-refiner.git
+cd skill-refiner
+python3 scripts/install_skill.py \
+  --skill-dir "$HOME/.cursor/skills/skill-refiner" \
+  --config /absolute/path/to/backends.json
+```
+
+Use your host's path in `--skill-dir`, such as `~/.cursor/skills/skill-refiner`,
+`~/.claude/skills/skill-refiner`, or `${CODEX_HOME:-$HOME/.codex}/skills/skill-refiner`.
+For project-level sharing, use a project skills directory such as
+`/path/to/project/.cursor/skills/skill-refiner`. The installer provisions an
+isolated Python environment, checksum-verifies and pins skill-up v0.13.0, installs
+the Skill and writes its local runtime settings. It refuses to overwrite an
+existing Skill or runtime. Configure the actual model and CLI backends first;
+available choices and examples are in [backend configuration](skill-refiner/references/backends.md).
+Then describe the business workflow or target Skill to your agent in natural language.
+
+If you only want the Skill files, copy the `skill-refiner/` directory into the
+host's skill folder or use the [multi-agent skills installer](https://github.com/vercel-labs/skills):
+
+```sh
+npx skills add zous168/skill-refiner --skill skill-refiner --global --agent cursor
+```
+
+Replace `cursor` with the agent name supported by that installer. This files-only
+route does not provision the runtime above; do not run both installers into the
+same destination, because the full installer deliberately refuses to overwrite an
+existing Skill.
 
 ## Natural-language use in Codex
 
