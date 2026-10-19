@@ -14,7 +14,12 @@ references. Explain important decisions; avoid arbitrary mandatory headings, len
 or adding examples/configuration where irrelevant. Prefer narrow fixes supported by failures.
 Use reusable scripts for demonstrated repeated deterministic work. Do not delete capabilities
 or weaken existing tests. Normative requirements come from supplied requirements and standards;
-the current implementation is evidence, not an infallible source of truth."""
+the current implementation is evidence, not an infallible source of truth. For Skills that can
+be blocked by a material business decision, local configuration, permissions, or an unavailable
+dependency, include a conditional help-request path: inspect evidence first, explain the concrete
+blocker, ask only for the smallest safe choice or action, and continue with fresh checks after
+the answer. Use a host-native input tool when available and conversation otherwise. Never request
+secrets in chat. Do not add unnecessary questions to deterministic workflows."""
 
 
 def lint(root, expected_name=None):

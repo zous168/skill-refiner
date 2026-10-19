@@ -239,8 +239,12 @@ def compare_candidate(baseline_passed, best_result, best_findings, current, curr
 
 def run(args):
     config = load_config(getattr(args, "config", None))
-    if config and (args.agent_command or args.engine_config or args.engine != "codex"):
+    if config and (args.agent_command or args.engine_config or args.engine is not None):
         raise RefinerError("Use --config alone for backend selection; legacy engine/command flags cannot be mixed")
+    if not config and not args.agent_command:
+        raise RefinerError("Select a controller backend with --config or --agent-command")
+    if not config and not args.engine_config and args.engine is None:
+        raise RefinerError("Select an evaluation backend with --config, --engine-config or --engine")
     source = Path(args.target).resolve()
     if not (source / "SKILL.md").is_file():
         raise RefinerError(f"No SKILL.md in {source}")

@@ -43,7 +43,9 @@ def locate(explicit=None):
 
 
 class SkillUp:
-    def __init__(self, executable, engine="codex", engine_config=None, timeout=240, parallelism=2):
+    def __init__(self, executable, engine=None, engine_config=None, timeout=240, parallelism=2):
+        if engine_config is None and engine is None:
+            raise RefinerError("No evaluation engine selected; configure an executor or pass --engine explicitly")
         self.executable = locate(executable)
         self.engine = engine_config or {"name": engine}
         self.timeout = timeout

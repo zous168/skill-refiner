@@ -71,8 +71,11 @@ def load_config(path):
 
 def role_profile(config, role):
     agents = (config or {}).get("agents", {})
-    fallback = agents.get("repair", agents.get("default", {"backend": "codex"})) if role == "draft" else agents.get("default", {"backend": "codex"})
-    return agents.get(ROLES[role], fallback)
+    fallback = agents.get("repair", agents.get("default")) if role == "draft" else agents.get("default")
+    profile = agents.get(ROLES[role], fallback)
+    if profile is None:
+        raise RefinerError(f"No backend configured for role {role!r}; set its profile or agents.default")
+    return profile
 
 
 def skillup_engine(profile, directory):

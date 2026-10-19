@@ -9,6 +9,9 @@ repair and regression. Use `compare TARGET --suite /absolute/path/previous-run
 and acceptance suites on another candidate without planning or modifying it.
 The compare command validates the suite lock, but deliberately allows a changed
 target: its results describe the old contract, not coverage of new capabilities.
+No provider is selected implicitly. A managed workflow must receive a complete
+`--config`; the legacy interface requires an explicit controller command and
+evaluation engine. This lets each host use adapters it actually supports.
 
 ```json
 {
@@ -38,7 +41,8 @@ target: its results describe the old contract, not coverage of new capabilities.
 }
 ```
 
-`agents.default` supplies a fallback; omitted roles default to Codex. `planning`
+`agents.default` supplies a fallback for omitted roles; without a matching role or
+default profile, the workflow stops with a configuration error rather than choosing a vendor. `planning`
 handles development and independent acceptance planning; `review` handles plan
 and standards review. Each call starts a new context. All controller roles can use any
 managed CLI or OpenAI-compatible backend, including `codex_subagent`. Model names

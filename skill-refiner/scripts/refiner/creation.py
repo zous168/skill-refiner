@@ -87,6 +87,28 @@ DRAFT = {
             "properties": {"path": STRING, "content": {"type": "string"},
                            "reason": {"type": "string", "minLength": 8}, "requirement_ids": IDS}}}},
 }
+DRAFT_INSTRUCTION = (
+    'Create the complete first implementation of the requested Agent Skill from the approved business '
+    'analysis and original requirements. All file paths are relative to the Skill root: use SKILL.md, '
+    'scripts/NAME.py and references/NAME.md without a surrounding Skill-name directory. '
+    'Return full UTF-8 files, including SKILL.md with valid YAML '
+    'name/description matching analysis.name, focused instructions, discoverable references, and working '
+    'support scripts wherever deterministic business work benefits from them. Implement the actual workflow, '
+    'not placeholders, TODOs, mock results, hardcoded inputs or documentation-only scaffolding. Use the local '
+    'runtime and standard library where sufficient. Define concrete invocation, input/output and error '
+    'contracts consistent with the user request; record nonmaterial assumptions. A local script should '
+    'return machine-checkable results and instructions must require using it when it implements the workflow. '
+    'Preserve the requested error output and exit-status contract rather than inventing one. '
+    'When a missing business choice, permission, runtime setup, configuration, or dependency can materially '
+    'block correct or safe use, include a conditional help-request procedure in the Skill: inspect available '
+    'evidence first, explain the concrete blocker and smallest safe next action, ask through the host native '
+    'input tool when available (otherwise conversation), and rerun affected checks after the answer. Ask only '
+    'for decisions the user must make; record safe local configuration steps, and never request secrets in chat. '
+    'Do not add questions for deterministic details that can be handled as explicit assumptions. '
+    'Do not instruct an executor to edit its installed Skill. Do not create tests/evals, graders, credentials, '
+    'global configuration or fabricated service adapters. Independent tests are generated later. Every file '
+    'must cite valid requirement IDs.'
+)
 
 
 def normalize_draft(draft, name):
@@ -169,8 +191,12 @@ def run(args):
     if args.name and len(args.name) > 64:
         raise RefinerError("--name must be at most 64 characters")
     config = load_config(args.config)
-    if config and (args.agent_command or args.engine_config or args.engine != "codex"):
+    if config and (args.agent_command or args.engine_config or args.engine is not None):
         raise RefinerError("Use --config alone for backend selection")
+    if not config and not args.agent_command:
+        raise RefinerError("Select a controller backend with --config or --agent-command")
+    if not config and not args.engine_config and args.engine is None:
+        raise RefinerError("Select an evaluation backend with --config, --engine-config or --engine")
     for reference in args.spec + args.standard:
         if not Path(reference).is_file():
             raise RefinerError("Reference file does not exist: " + reference)
@@ -253,6 +279,8 @@ def run(args):
                 'behaviors to applicable scenario intents. These are scenario intents, not frozen tests or implementation. '
                 'Do not add arbitrary business rules, integrations or approval policies. Explicitly record reasonable '
                 'nonmaterial implementation assumptions; missing material business rules belong in blocking_questions. '
+                'Each blocking question must be concise and answerable, state the material choice needed, and avoid '
+                'requesting credentials or asking the user to diagnose an operational failure that can be checked. '
                 'Do not claim an external dependency is verified or replace real services with fabricated success. '
                 'Keep dependencies to the user scope. A category is inapplicable only with a concrete scope-based reason; '
                 'normal behavior is always applicable. Do not implement code or provide test answers at this stage.',
@@ -294,20 +322,7 @@ def run(args):
             snapshot(resumed_draft,draft_root)
         for attempt in range(0 if resumed_draft else 2):
             draft = agent.ask('draft',
-                'Create the complete first implementation of the requested Agent Skill from the approved business '
-                'analysis and original requirements. All file paths are relative to the Skill root: use SKILL.md, '
-                'scripts/NAME.py and references/NAME.md without a surrounding Skill-name directory. '
-                'Return full UTF-8 files, including SKILL.md with valid YAML '
-                'name/description matching analysis.name, focused instructions, discoverable references, and working '
-                'support scripts wherever deterministic business work benefits from them. Implement the actual workflow, '
-                'not placeholders, TODOs, mock results, hardcoded inputs or documentation-only scaffolding. Use the local '
-                'runtime and standard library where sufficient. Define concrete invocation, input/output and error '
-                'contracts consistent with the user request; record nonmaterial assumptions. A local script should '
-                'return machine-checkable results and instructions must require using it when it implements the workflow. '
-                'Preserve the requested error output and exit-status contract rather than inventing one. '
-                'Do not instruct an executor to edit '
-                'its installed Skill. Do not create tests/evals, graders, credentials, global configuration or fabricated '
-                'service adapters. Independent tests are generated later. Every file must cite valid requirement IDs.',
+                DRAFT_INSTRUCTION,
                 {'inputs': inputs, 'analysis': analysis, 'validation_feedback': feedback,
                  **({'previous_draft': previous_draft} if previous_draft else {})}, DRAFT)
             previous_draft = draft

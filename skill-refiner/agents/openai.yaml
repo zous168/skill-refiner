@@ -1,7 +1,8 @@
+# Optional Codex discovery metadata. The portable workflow is defined in SKILL.md.
 interface:
   display_name: "Skill Refiner"
   short_description: "从业务需求创建 Skill，或改进已有 Skill，自动规划场景、修复并做多引擎回归"
-  default_prompt: "用 $skill-refiner 根据我的业务需求创建或改进 Skill，自主分析流程、编写实现、规划正常边界异常测试，修复优化并完成多引擎回归与独立验收，保留证据。"
+  default_prompt: "用 $skill-refiner 根据我的业务需求创建或改进 Skill，执行分析、测试规划、按规范修复和多引擎回归；只在关键业务选择或本地配置确实阻塞时，通过结构化询问（不可用时用对话）向我求助；完整通过 verify 门禁后再交付，失败时保留证据，不要绕过验收或宣称完成。"
 
 policy:
   allow_implicit_invocation: true

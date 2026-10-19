@@ -8,9 +8,10 @@ import tempfile
 import unittest
 
 from refiner.common import RefinerError, digest, manifest
-from refiner.creation import normalize_draft, validate_analysis, validate_analysis_review
+from refiner.creation import DRAFT_INSTRUCTION, normalize_draft, validate_analysis, validate_analysis_review
 from refiner.pipeline import make_plan
 from refiner.profiles import role_profile
+from refiner.standards import AUTHORING
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT/'tests/fixtures/creation_agent.py'
@@ -23,6 +24,14 @@ def analyze():
 
 
 class CreationContracts(unittest.TestCase):
+    def test_creation_and_repair_guidance_uses_conditional_evidence_first_questions(self):
+        for guidance in (DRAFT_INSTRUCTION, AUTHORING):
+            with self.subTest(guidance=guidance[:40]):
+                self.assertIn('inspect', guidance)
+                self.assertIn('host', guidance)
+                self.assertIn('secrets', guidance)
+                self.assertIn('conditional', guidance)
+
     def test_named_packaging_directory_is_unwrapped_without_changing_contents(self):
         draft={'files':[{'path':'example/SKILL.md','content':'original instructions'},
                         {'path':'example/scripts/run.py','content':'print(37)'}]}
@@ -56,11 +65,15 @@ class CreationContracts(unittest.TestCase):
             validate_analysis_review(review, analysis)
 
     def test_creation_role_can_differ_from_repair_and_defaults_to_repair(self):
-        profiles = {'agents': {'repair': {'backend': 'codex_subagent'}, 'creation': {'backend': 'cursor'}}}
+        profiles = {'agents': {'default': {'backend': 'command'},
+                               'repair': {'backend': 'codex_subagent'}, 'creation': {'backend': 'cursor'}}}
         self.assertEqual(role_profile(profiles, 'draft')['backend'], 'cursor')
         del profiles['agents']['creation']
         self.assertEqual(role_profile(profiles, 'draft')['backend'], 'codex_subagent')
-        self.assertEqual(role_profile(profiles, 'analyze')['backend'], 'codex')
+        self.assertEqual(role_profile(profiles, 'analyze')['backend'], 'command')
+        del profiles['agents']['default']
+        with self.assertRaisesRegex(RefinerError, 'No backend configured'):
+            role_profile(profiles, 'analyze')
 
     def test_test_planner_cannot_drop_error_cases_or_change_creation_contract(self):
         analysis = analyze()

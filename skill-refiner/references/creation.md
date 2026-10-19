@@ -33,13 +33,43 @@ instead of interpolating it into executable shell text.
 
 `agents.planning` handles analysis and tests, `agents.review` handles business/test/
 standards reviews, `agents.creation` writes the first implementation (falling back
-to repair, then default, then Codex), and `agents.repair` fixes observed failures.
+to `agents.repair`, then `agents.default`), and `agents.repair` fixes observed failures.
+Every role must resolve to a configured backend; the controller does not choose a
+model vendor implicitly.
 They are independently configurable. Role-call and wall-clock budgets cover the
 entire creation plus refinement workflow; no budget resets between stages.
 Create defaults allow up to four plan/review attempts per suite, eight development
 cases and six acceptance cases. `--planning-attempts`, `--max-cases` and
 `--acceptance-cases` override these caps. Revisions receive the prior plan and
 accumulated concrete review issues; rejected versions are preserved.
+
+## Clarification and help requests
+
+The command-line pipeline records material business unknowns as
+`state.json.questions`, emits `needs_clarification`, and saves them in
+`business-analysis.md` and `report.md`. It does not itself open a chat prompt. The
+Skill host/orchestrator must relay those questions to the user through its native
+structured input facility when available, or ordinary conversation otherwise. Ask
+the fewest answerable questions that resolve the uncertainty; identify why each
+answer changes behavior and offer a recommended default when safe.
+
+Before asking for operational help, inspect `doctor` output, the run status, exit
+code, stderr/stdout, and relevant backend/configuration files. Classify the blocker
+as a business decision, missing local setup, permission, unavailable integration,
+or an implementation/test failure. Tell the user exactly which local action or
+choice unblocks it. Ask for endpoint/provider/model names or a config file path only
+when needed. Never request credentials in chat; direct the user to configure them
+locally using the host's secret store or environment.
+
+After receiving an answer, preserve it in an additional UTF-8 clarification
+requirements file and start a fresh `create` invocation with the original inputs and
+the clarification file. Do not pass changed business inputs to `--resume-from`;
+resume is only for an unchanged approved contract and validated draft. Regenerate
+affected development and acceptance plans and execute fresh verification. If the
+user cannot answer or perform the local action, leave the run incomplete, preserve
+the diagnostics, and report what remains blocked. Existing Skills follow the same
+evidence-first and question policy before and during `run`; configuration changes
+belong in a per-run config passed with `--config`, not a silent global-default edit.
 
 ## Outputs and stops
 

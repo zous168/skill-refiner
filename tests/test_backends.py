@@ -26,6 +26,23 @@ FIXTURE = ROOT / "tests/fixtures"
 
 
 class ProfilesAndEvidence(unittest.TestCase):
+    def test_agent_refuses_to_silently_select_a_vendor_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent = Agent(Path(tmp) / "run")
+            with self.assertRaisesRegex(RefinerError, "No agent backend configured"):
+                agent.ask("plan", "return an object", {}, {"type": "object"})
+
+    def test_cli_requires_explicit_adapter_and_generic_doctor_does_not_assume_codex(self):
+        doctor = subprocess.run([sys.executable, "-m", "refiner.cli", "doctor"], cwd=ROOT,
+                                text=True, capture_output=True)
+        report = json.loads(doctor.stdout)
+        self.assertTrue(report["backend_config_required"])
+        self.assertNotIn("codex", report)
+        run = subprocess.run([sys.executable, "-m", "refiner.cli", "run", "/missing-skill"], cwd=ROOT,
+                             text=True, capture_output=True)
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("Select a controller backend", run.stderr)
+
     def test_command_paths_are_equivalent_only_inside_the_actual_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

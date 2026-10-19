@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import shutil
 import sys
 
 from .bootstrap import PROJECT_ROOT, install
@@ -17,7 +16,8 @@ def workflow_options(parser, *, creating=False):
     parser.add_argument("--output", help="New evidence workspace; must not already exist")
     parser.add_argument("--config", help="Independent analysis/creation/planning/repair/review and regression backends")
     parser.add_argument("--skill-up", help="Explicit skill-up executable")
-    parser.add_argument("--engine", default="codex", choices=["codex", "claude_code"])
+    parser.add_argument("--engine", choices=["codex", "claude_code"],
+                        help="Legacy skill-up engine; select explicitly when not using --config")
     parser.add_argument("--engine-config", help="Legacy skill-up engine JSON")
     parser.add_argument("--agent-command", help="Legacy controller JSON stdin/stdout command")
     parser.add_argument("--max-rounds", type=int, default=3)
@@ -41,6 +41,8 @@ def main(argv=None):
     doctor.add_argument("--config", help="Inspect every configured backend without making model calls")
     check = subs.add_parser("check", help="Run deterministic Skill format/resource/script checks")
     check.add_argument("target")
+    verify = subs.add_parser("verify", help="Verify that a run passed every required pipeline gate")
+    verify.add_argument("run", help="Completed run workspace created by `run` or `create`")
     execute = subs.add_parser("run", help="Plan, evaluate, repair, regress and independently accept a Skill")
     execute.add_argument("target")
     workflow_options(execute)
@@ -77,22 +79,25 @@ def main(argv=None):
                 up = locate()
             except RefinerError:
                 up = None
-            result = {"python": sys.executable, "codex": shutil.which("codex"),
-                      "skill_up": up, "project": str(PROJECT_ROOT)}
+            result = {"python": sys.executable, "skill_up": up, "project": str(PROJECT_ROOT),
+                      "backend_config_required": True,
+                      "note": "No provider is selected by default. Pass --config to check configured backends; "
+                              "workflows require --config or an explicit legacy adapter."}
             if up:
                 code, output, _, _ = run_process([up, "--version"], timeout=15)
                 result["skill_up_version"] = output.strip()
                 result["skill_up_works"] = code == 0
-            if result["codex"]:
-                code, output, stderr, _ = run_process(["codex", "login", "status"], timeout=15)
-                result["codex_authenticated"] = code == 0
-                result["codex_auth_status"] = (output + stderr).strip()
-            print(json.dumps(result, indent=2))
-            return 0 if result.get("skill_up_works") and result.get("codex_authenticated") else 1
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("skill_up_works") else 1
         if args.command == "check":
             findings = lint(Path(args.target).resolve())
             print(json.dumps(findings, ensure_ascii=False, indent=2))
             return int(any(f["severity"] == "error" for f in findings))
+        if args.command == "verify":
+            from .gate import verify_run
+            result = verify_run(args.run)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "compare":
             for key in ("parallelism", "timeout", "max_seconds", "max_evaluations"):
                 if getattr(args, key) < 1:
