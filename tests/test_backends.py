@@ -123,11 +123,34 @@ class ProfilesAndEvidence(unittest.TestCase):
             path = Path(tmp) / "config.json"
             for bad in [dict(data, executors=data["executors"] * 2),
                         dict(data, agents={"repair": {"backend": "codex", "api_key": "secret"}}),
+                        dict(data, agents={"repair": {"backend": "codex", "max_request_bytes": 100}}),
                         dict(data, executors=[{"id": "x", "backend": "openai_compatible", "model": "m",
                                              "base_url": "https://example.com/v1", "request_options": {"messages": []}}])]:
                 write_json(path, bad)
                 with self.assertRaises(RefinerError):
                     load_config(path)
+
+    def test_oversized_agent_handoff_is_saved_and_rejected_before_backend_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "backend-was-run"
+            script = root / "agent.py"
+            script.write_text('from pathlib import Path; Path(' + repr(str(marker)) + ').write_text("yes")')
+            config = {"agents": {"default": {"backend": "command", "command": [sys.executable, str(script)],
+                                               "max_request_bytes": 16_384}}}
+            agent = Agent(root / "run", config=config)
+            with self.assertRaisesRegex(RefinerError, "exceeding the configured"):
+                agent.ask("plan", "return a JSON object", {"source": "x" * 20_000}, {"type": "object"})
+            call = root / "run/agent-calls/001-plan"
+            request = json.loads((call / "request.json").read_text())
+            manifest = json.loads((call / "request-manifest.json").read_text())
+            transmission = (call / "transmission.txt").read_bytes()
+            self.assertEqual(request["schema_version"], "skill-refiner.agent-request/v1")
+            self.assertEqual(manifest["status"], "rejected_context_budget")
+            self.assertGreater(manifest["transmitted_bytes"], manifest["max_request_bytes"])
+            self.assertEqual(manifest["transmitted_bytes"], len(transmission))
+            self.assertEqual(manifest["transmitted_sha256"], __import__("hashlib").sha256(transmission).hexdigest())
+            self.assertFalse(marker.exists())
 
     def test_planning_repair_and_review_route_to_separate_processes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,6 +165,13 @@ class ProfilesAndEvidence(unittest.TestCase):
                                    ("repair", "repair"), ("plan-review", "review"), ("standards-review", "review")]:
                 result = agent.ask(role, "return JSON", {}, {"type": "object"})
                 self.assertEqual(result, {"backend": expected, "role": role})
+            for call in (tmp / "run/agent-calls").iterdir():
+                request = json.loads((call / "request.json").read_text())
+                transmitted = (call / "transmission.txt").read_bytes()
+                saved = json.loads((call / "request-manifest.json").read_text())
+                self.assertEqual(json.loads(transmitted), request)
+                self.assertEqual(saved["transmitted_bytes"], len(transmitted))
+                self.assertEqual(saved["transmitted_sha256"], __import__("hashlib").sha256(transmitted).hexdigest())
 
     def test_cursor_requires_observed_completed_tool_result(self):
         events = [{"type": "tool_call", "subtype": "started", "call_id": "x", "tool_call": {

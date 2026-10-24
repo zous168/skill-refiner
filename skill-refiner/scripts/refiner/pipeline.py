@@ -5,6 +5,7 @@ import difflib
 import json
 import hashlib
 import copy
+import re
 from pathlib import Path
 import time
 
@@ -18,6 +19,7 @@ from .skillup import SkillUp
 from .standards import AUTHORING, lint
 from .profiles import load_config
 from .matrix import Matrix
+from .stages import StageManifest, REFINE_EVENTS
 
 
 PLANNING = """Inspect every relevant supplied Skill file, executable implementation, references and
@@ -206,7 +208,7 @@ def standards_review(agent, target, context, work, expected_name):
                        "examples, length padding or new features. Only reject concrete material violations, "
                        "quoting the file/section and applicable rule in each issue. Do not grade execution "
                        "by reading prose; behavior is evaluated separately. Missing necessary evidence is a gap.",
-                       {"files": inventory(target), "standards": context["standards"],
+                       {"files": inventory(target, max_bytes=300_000), "standards": context["standards"],
                         "requirements": context["requirements"], "static_findings": findings}, REVIEW)
     for i, issue in enumerate(review["issues"] if not review["approved"] else []):
         findings.append({"id": f"N-{i+1:03}", "rule": "authoring.review", "path": "SKILL.md",
@@ -223,6 +225,41 @@ def score(result, findings):
 
 def qualifies(result, findings, unresolved=()):
     return not unresolved and score(result, findings) == (0, 0, 0)
+
+
+def source_references(rows, default_prefix):
+    """Carry provenance for large source artifacts without repeating their contents."""
+    result = []
+    for index, row in enumerate(rows):
+        if isinstance(row, dict):
+            source, content = row.get("source", f"{default_prefix}:{index+1}"), row.get("content", "")
+        else:
+            source, content = f"{default_prefix}:{index+1}", str(row)
+        data = content.encode("utf-8")
+        result.append({"source": source, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return result
+
+
+def linked_source_paths(root, findings):
+    """Prioritize the entrypoint, cited files and local references linked by the Skill."""
+    root = Path(root)
+    paths = {"SKILL.md"}
+    paths.update(str(item.get("path")) for item in findings if item.get("path"))
+    scan = [root / "SKILL.md"]
+    scan.extend((root / "references").glob("*.md") if (root / "references").is_dir() else [])
+    for source in scan:
+        try:
+            content = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        for ref in re.findall(r"\]\(([^)]+)\)", content):
+            value = ref.split("#", 1)[0]
+            if not value or "://" in value or value.startswith(("mailto:", "/")):
+                continue
+            candidate = (source.parent / value).resolve()
+            if candidate.is_relative_to(root.resolve()) and candidate.is_file():
+                paths.add(candidate.relative_to(root.resolve()).as_posix())
+    return paths
 
 
 def compare_candidate(baseline_passed, best_result, best_findings, current, current_findings,
@@ -270,13 +307,15 @@ def run(args):
     agent.max_calls = args.max_agent_calls
     agent.deadline = started + args.max_seconds
     engine_config = read_json(args.engine_config) if args.engine_config else None
-    context = {"files": inventory(original), "requirements": [], "standards": [AUTHORING]}
+    context = {"files": inventory(original, max_bytes=300_000), "requirements": [], "standards": [AUTHORING]}
     context.update(getattr(args, "creation_context", {}))
     for path in args.spec:
         context["requirements"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
     for path in args.standard:
         context["standards"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
     write_json(work / "inputs.json", context)
+    stages = StageManifest(work, "refine")
+    stages.complete("inputs")
     locked = None
     checker_file = Path(__file__).with_name("checks.py")
     checker_hash = hashlib.sha256(checker_file.read_bytes()).hexdigest()
@@ -296,6 +335,8 @@ def run(args):
         return result
 
     def event(status, **data):
+        if status in REFINE_EVENTS:
+            stages.activate(REFINE_EVENTS[status])
         state.update(status=status, agent_calls=agent.calls, elapsed_seconds=round(time.monotonic()-started, 2), **data)
         write_json(work / "state.json", state)
         print(json.dumps({"status": status, **data}, ensure_ascii=False), flush=True)
@@ -324,6 +365,7 @@ def run(args):
             write_json(work / "backend-config.json", config)
         backend.deadline = started + args.max_seconds
         backend.max_evaluations = args.max_evaluations
+        event("planning")
         reuse = getattr(args, "reuse_plan", None)
         if reuse:
             previous = Path(reuse).resolve()
@@ -395,7 +437,9 @@ def run(args):
                             | {u["id"] for u in unresolved_evidence})
             repair_schema = copy.deepcopy(REPAIR)
             repair_schema["properties"]["changes"]["items"]["properties"]["evidence_ids"]["items"]["enum"] = sorted(evidence_ids)
-            response = agent.ask("repair", "Diagnose the failed cases and material standards violations. "
+            response = agent.ask("repair", "Diagnose the failed cases and material standards violations from "
+                                 "the supplied frozen requirement contract and cited findings. Large source documents "
+                                 "are retained as hash-addressed artifacts; do not assume omitted source text. "
                                  "Return narrow full-file replacements with concrete reasons and evidence_ids. "
                                  "Preserve the Skill's identity, scope and valid existing behavior. Fix supporting "
                                  "scripts if they cause failure, not just prose. Never edit evals, tests, requirements "
@@ -405,12 +449,15 @@ def run(args):
                                  "required behaviors, not intentional scope exclusions. The controller runs your patch "
                                  "afterwards: not having executed it yourself is not an unresolved behavior. "
                                  "Use only allowed_evidence_ids, not requirement IDs. You do not see acceptance cases.",
-                                 {"files": inventory(best), "requirements": plan["requirements"],
-                                  "external_requirements": context["requirements"], "standards": context["standards"],
+                                 {"files": inventory(best, max_bytes=120_000,
+                                                     priority_paths=linked_source_paths(best, errors)),
+                                  "requirements": plan["requirements"],
+                                  "requirement_sources": source_references(context["requirements"], "requirement"),
+                                  "standard_sources": source_references(context["standards"], "standard"),
                                   "allowed_evidence_ids": sorted(evidence_ids),
                                   "failures": failing, "findings": errors,
                                   "previous_unresolved": unresolved_evidence,
-                                  "failure_evidence": repair_evidence(failing),
+                                  "failure_evidence": repair_evidence(failing, max_bytes=60_000),
                                   "failing_cases": [c for c in plan["cases"] if c["id"] in
                                                     {r.get("case_id", r["id"]) for r in failing}]}, repair_schema)
             write_json(round_dir / "changes.json", response)
@@ -491,12 +538,28 @@ def run(args):
             state["target_evaluations"] = backend.evaluations
         write_json(work / "state.json", state)
         write_report(work, state)
+        if state.get("status") in {"passed", "unchanged"}:
+            stages.activate("verification")
+            try:
+                from .gate import verify_run
+                verification = verify_run(work)
+                write_json(work / "verification.json", verification)
+                state["verification_status"] = verification["status"]
+            except Exception as exc:
+                state.update(status="verification_failed", verification_error=str(exc))
+            write_json(work / "state.json", state)
+            write_report(work, state)
+        stages.finish(state.get("status", "error"))
 
 
 def write_report(work, state):
     lines = ["# Skill Refiner result", "", f"Status: **{state['status']}**", "",
              f"Original: `{state['source']}`", f"Agent calls: {state.get('agent_calls', 0)}",
              f"Elapsed: {state.get('elapsed_seconds', 0)} seconds", ""]
+    if state.get("verification_status"):
+        lines.insert(3, f"Verification: **{state['verification_status']}**")
+    elif state.get("verification_error"):
+        lines.insert(3, "Verification: **failed** — " + state["verification_error"])
     if state.get("final_skill"):
         lines += [f"Candidate: `{state['final_skill']}`", "Original files were not overwritten.", ""]
     phases = [("Baseline", work/"baseline"/"summary.json")]

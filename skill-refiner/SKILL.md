@@ -33,6 +33,8 @@ Do not invent business requirements from implementation mistakes.
 Follow the general [Skill design and interaction lifecycle](references/design-lifecycle.md)
 for both creation and refinement, including evidence-first diagnosis and asking the
 user only for material decisions or local actions that cannot be resolved safely.
+Use the versioned [stage contracts and handoff artifacts](references/stage-contracts.md)
+to keep each phase's inputs, outputs, formats, hashes and context budget explicit.
 
 Create a unique task directory outside the target, such as a project-local
 `.refiner-runs/<target>-<timestamp>/`, containing `inputs/` and a not-yet-created

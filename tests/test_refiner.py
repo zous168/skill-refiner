@@ -169,6 +169,11 @@ class SkillUpIntegration(unittest.TestCase):
                              ((tmp/"run/report.md").read_text() if (tmp/"run/report.md").exists() else ""))
             state = json.loads((tmp/"run/state.json").read_text())
             self.assertEqual(state["status"], "failed_acceptance" if acceptance_failure else "passed")
+            if not acceptance_failure:
+                self.assertEqual(state["verification_status"], "verified")
+                self.assertEqual(json.loads((tmp/"run/verification.json").read_text())["status"], "verified")
+                stages = json.loads((tmp/"run/stages.json").read_text())
+                self.assertTrue(all(stage["status"] == "completed" for stage in stages["stages"]))
             self.assertEqual(len(state["rounds"]), 2)
             self.assertTrue(all(r["accepted"] for r in state["rounds"]))
             self.assertTrue(state["rounds"][0]["unresolved"])

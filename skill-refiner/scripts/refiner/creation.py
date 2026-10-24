@@ -15,6 +15,7 @@ from .pipeline import apply_changes, run as refine
 from .profiles import load_config
 from .schemas import PLAN, REVIEW
 from .standards import AUTHORING, lint
+from .stages import StageManifest, CREATE_EVENTS
 
 STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
@@ -242,6 +243,18 @@ def run(args):
     (work / 'inputs').mkdir()
     request_file = work / 'inputs/business-request.md'
     request_file.write_text(inputs['business_description'] + '\n', encoding='utf-8')
+    spec_paths = []
+    for index, requirement in enumerate(inputs['requirements']):
+        path = work / 'inputs' / f'requirement-{index+1}.md'
+        path.write_text(requirement['content'], encoding='utf-8')
+        spec_paths.append(str(path))
+    standard_paths = []
+    for index, standard in enumerate(inputs['standards'][1:]):
+        path = work / 'inputs' / f'standard-{index+1}.md'
+        path.write_text(standard['content'], encoding='utf-8')
+        standard_paths.append(str(path))
+    stages = StageManifest(work, "create")
+    stages.complete("inputs")
     input_hash = digest(inputs)
     business_sources = ([{'id': 'business_description', 'content': inputs['business_description']}] if inputs['business_description'] else []) + [
         {'id': f'spec-{index+1}', 'source': row['source'], 'content': row['content']}
@@ -251,6 +264,8 @@ def run(args):
     locked = None
 
     def event(status, **extra):
+        if status in CREATE_EVENTS:
+            stages.activate(CREATE_EVENTS[status])
         state.update(status=status, **extra)
         write_json(work / 'state.json', state)
         print(json.dumps({'status': status, **extra}, ensure_ascii=False), flush=True)
@@ -300,6 +315,7 @@ def run(args):
                     'contracts and unjustified exclusions of normal/boundary/error scenarios. Do not require features '
                     'the user excluded. Approve only a clear, scoped contract suitable for independent test planning.',
                     {'inputs': inputs, 'analysis': analysis}, ANALYSIS_REVIEW)
+                write_json(work / 'analysis-review.json', review)
                 validate_analysis_review(review, analysis)
                 if not review['approved']:
                     raise RefinerError('; '.join(review['issues']))
@@ -354,17 +370,8 @@ def run(args):
         child = copy.copy(args)
         child.target, child.output, child.reuse_plan = str(draft_root), str(work / 'refinement'), None
         # Use the saved original requirements, not an implementation-derived spec.
-        spec_paths = [str(request_file)] if inputs['business_description'] else []
-        for index, requirement in enumerate(inputs['requirements']):
-            path = work / 'inputs' / f'requirement-{index+1}.md'
-            path.write_text(requirement['content'])
-            spec_paths.append(str(path))
-        standard_paths = []
-        for index, standard in enumerate(inputs['standards'][1:]):
-            path = work / 'inputs' / f'standard-{index+1}.md'
-            path.write_text(standard['content'])
-            standard_paths.append(str(path))
-        child.spec, child.standard = spec_paths, standard_paths
+        child.spec = ([str(request_file)] if inputs['business_description'] else []) + spec_paths
+        child.standard = standard_paths
         child.max_seconds, child.max_agent_calls = max(1, int(deadline - time.monotonic())), remaining
         child.creation_context = {'contract': analysis['requirements'], 'business_analysis': analysis,
                                   'execution_helpers': PYTHON_OBSERVER_GUIDE,
@@ -397,9 +404,6 @@ def run(args):
         write_json(work / 'final/evidence.json', {'business_lock': locked, 'draft_manifest': initial_manifest,
                    'candidate_manifest': manifest(final), 'refinement_evidence': str(work / 'refinement/final/evidence.json'),
                    'refinement_evidence_sha256': digest(read_json(work / 'refinement/final/evidence.json'))})
-        if destination:
-            snapshot(final, destination)
-            state['destination'] = str(destination)
         event('created', final_skill=str(final))
         return state
     except Cancelled as exc:
@@ -439,3 +443,21 @@ def run(args):
                                   '```json', json.dumps({'prompt': case['prompt'], 'inputs': case['files'],
                                                        'checks': case['checks']}, ensure_ascii=False, indent=2), '```', '']
         (work / 'test-scenarios.md').write_text('\n'.join(scenarios) + '\n')
+        if state.get('status') == 'created':
+            stages.activate('verification')
+            try:
+                from .gate import verify_run
+                verification = verify_run(work)
+                write_json(work / 'verification.json', verification)
+                state['verification_status'] = verification['status']
+                if destination:
+                    snapshot(state['final_skill'], destination)
+                    state['destination'] = str(destination)
+            except Exception as exc:
+                state.update(status='verification_failed', verification_error=str(exc))
+            write_json(work / 'state.json', state)
+            lines.insert(3, 'Verification: **' + state.get('verification_status', 'failed') + '**')
+            if state.get('verification_error'):
+                lines += ['', 'Verification error: ' + state['verification_error']]
+            (work / 'report.md').write_text('\n'.join(lines) + '\n')
+        stages.finish(state.get('status', 'error'))

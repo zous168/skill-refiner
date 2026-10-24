@@ -70,6 +70,14 @@ Keep the user's public contract stable. Avoid placeholder integrations, fabricat
 success, unrequested side effects, unnecessary dependencies, and instructions that
 claim support for a host feature that has not been verified.
 
+Divide work into stages when a single context would accumulate unrelated sources,
+large fixtures or repeated history. Before implementation, define each stage's stable
+ID, purpose, required inputs, output artifacts and media/JSON schema, validation gate,
+failure state, and provenance. Pass content only when the next stage needs it; otherwise
+pass a file reference with a hash and a concise summary. Preserve complete artifacts
+on disk. See [stage contracts and handoff artifacts](stage-contracts.md) for the
+controller's concrete versioned contracts and context budget.
+
 ## 5. Plan independent tests before repair
 
 Map every required behavior to at least one executable check. Plan concrete normal,
@@ -86,6 +94,12 @@ failures from that evidence and classify them as a Skill defect, a test/contract
 or an environment/configuration problem. Repair only from cited failures or standards
 findings. Ask the user only when an evidence-based safe next step depends on their
 choice or local access.
+
+Each model call receives a stage-specific request envelope and structured response
+schema. Keep the serialized handoff within the configured byte budget; if it does not
+fit, the controller saves and rejects the request with evidence instead of truncating
+it. Split oversized work along requirement or component boundaries while preserving
+the original frozen test contract and keeping held-out acceptance inputs out of repair.
 
 After each repair, rerun affected cases, the full suite, and previously passing cases.
 Then run fresh independent acceptance and compare engines on the same case set. An

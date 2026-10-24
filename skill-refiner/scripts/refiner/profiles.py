@@ -12,7 +12,7 @@ ROLES = {"analyze": "planning", "analysis-review": "review", "draft": "creation"
          "plan": "planning", "acceptance-plan": "planning", "repair": "repair",
          "plan-review": "review", "standards-review": "review"}
 FIELDS = {"id", "backend", "model", "executable", "command", "base_url", "api_key_env",
-          "max_turns", "timeout", "reasoning_effort", "child_model", "engine", "request_options"}
+          "max_turns", "timeout", "max_request_bytes", "reasoning_effort", "child_model", "engine", "request_options"}
 
 
 def validate_profile(profile, *, executor=False):
@@ -26,6 +26,9 @@ def validate_profile(profile, *, executor=False):
     for key in ("max_turns", "timeout"):
         if key in p and (type(p[key]) is not int or p[key] < 1):
             raise RefinerError(f"Profile {key} must be a positive integer")
+    if "max_request_bytes" in p and (type(p["max_request_bytes"]) is not int
+                                      or not 16_384 <= p["max_request_bytes"] <= 10_000_000):
+        raise RefinerError("Profile max_request_bytes must be an integer from 16384 to 10000000")
     for key in ("model", "executable", "base_url", "api_key_env", "reasoning_effort", "child_model"):
         if key in p and (not isinstance(p[key], str) or not p[key].strip()):
             raise RefinerError(f"Profile {key} must be a nonempty string")

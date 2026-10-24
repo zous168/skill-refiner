@@ -131,6 +131,12 @@ baseline → failure-driven repair/regression → fresh acceptance. Each applica
 normal/boundary/error category must occur in development and acceptance suites.
 The analysis cannot silently invent material business rules; unanswered questions
 stop with `needs_clarification`. Role-call/time budgets span the entire workflow.
+Every run records a versioned `stages.json` with stage inputs/outputs, validation
+gates, statuses and artifact hashes. `verification.json` is written only after the
+machine completion gate passes. Model requests also retain their exact transmitted
+payload and byte/hash manifest; oversized requests stop before backend transmission.
+See [stage contracts](skill-refiner/references/stage-contracts.md) and [backend
+configuration](skill-refiner/references/backends.md).
 
 Inspect `business-analysis.md`, `test-scenarios.md`, `report.md` and the full
 `refinement/` evidence. `created` is successful; failed/incomplete runs retain drafts
@@ -166,9 +172,11 @@ For your own Skill:
 
 Without `--output`, a uniquely named sibling workspace is created. The original
 Skill is never overwritten. A successful run writes `final/<skill-name>/`,
-`final/changes.patch`, `final/evidence.json` and `report.md`. `state.json` records
+`final/changes.patch`, `final/evidence.json`, `verification.json`, `stages.json` and
+`report.md`. `state.json` records
 non-successful stops too. Exit 0 means `passed` or `unchanged`; exit 2 means a
 reported failure, unresolved coverage, budget exhaustion or unavailable execution.
+The successful status is reached only when the completion gate also reports `verified`.
 
 ## What runs
 

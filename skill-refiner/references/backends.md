@@ -50,7 +50,12 @@ are sent exactly as configured, with no automatic substitution. An omitted CLI
 model uses that tool's local default. Configuration selects backends; it does not
 install a CLI, authenticate it, or grant access to a model.
 
-Profiles support `backend`, `model`, optional `executable`, `timeout` and `max_turns`.
+Profiles support `backend`, `model`, optional `executable`, `timeout`, `max_turns` and
+`max_request_bytes`. The latter bounds the exact serialized request or model prompt (default
+350,000 UTF-8 bytes; configurable from 16,384 to 10,000,000) and is recorded per call.
+It is a byte guard, not a provider-specific token count. Oversized requests are saved
+and rejected before transmission instead of being silently truncated. Set a larger
+limit only after verifying that role's actual model context window.
 Codex supports `reasoning_effort`; native delegation additionally supports
 `child_model` via Codex's default-subagent-model setting. Model access and that
 setting depend on the installed CLI/account; verify the resulting child records.

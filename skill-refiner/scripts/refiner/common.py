@@ -76,14 +76,19 @@ def snapshot(source, destination):
         shutil.copy2(path, dest)
 
 
-def inventory(root, max_bytes=250_000):
+def inventory(root, max_bytes=250_000, priority_paths=()):
     root = Path(root)
     records, used = [], 0
-    for path in files(root):
+    priority = {Path(item).as_posix() for item in priority_paths}
+    ordered = sorted(files(root), key=lambda item: (str(item.relative_to(root)) not in priority,
+                                                    str(item.relative_to(root))))
+    for path in ordered:
         size = path.stat().st_size
-        record = {"path": str(path.relative_to(root)), "bytes": size}
+        raw = path.read_bytes()
+        record = {"path": str(path.relative_to(root)), "bytes": size,
+                  "sha256": hashlib.sha256(raw).hexdigest()}
         try:
-            text = path.read_text(encoding="utf-8")
+            text = raw.decode("utf-8")
         except (UnicodeError, OSError):
             record["omitted"] = "binary"
         else:
