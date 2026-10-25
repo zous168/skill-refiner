@@ -26,7 +26,9 @@ def verify():
     video_id = 'video%2Fjob%3D42'
     observed = []
     handler_errors = []
-    client_path = Path(__file__).resolve().with_name('csp_media.py')
+    client_path = (Path(__file__).resolve().parents[1] / 'dist' / 'csp-media' /
+                   'scripts' / 'csp_media.py')
+    check(client_path.is_file(), 'build dist/csp-media before running the project contract tests')
     labels = {
         't2i': '文生图', 'i2i': '图生图', 't2v': '文生视频',
         'i2v': '图生视频', 'r2v': '参考生视频', 'voice': '声音克隆', 'speech': '语音合成',

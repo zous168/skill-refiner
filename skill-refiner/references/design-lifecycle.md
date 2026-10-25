@@ -15,6 +15,10 @@ and real execution traces before proposing changes.
 Separate confirmed requirements, evidence, reasonable low-impact assumptions, and
 unknowns. Trace each material behavior to the user's request or a supplied source.
 Do not turn implementation preferences or authoring standards into business rules.
+Load project conventions automatically from `PROJECT-STANDARDS.md` and
+`.skill-refiner/standards/*.md` in the current project and target's project ancestry.
+Freeze the discovered file paths and contents into the run inputs; use `--standard`
+only for additional standards.
 
 ## 2. Map the workflow and risks
 

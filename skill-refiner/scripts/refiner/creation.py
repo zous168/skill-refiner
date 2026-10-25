@@ -15,7 +15,7 @@ from .common import Cancelled, RefinerError, digest, manifest, read_json, snapsh
 from .pipeline import apply_changes, run as refine
 from .profiles import load_config
 from .schemas import PLAN, REVIEW
-from .standards import AUTHORING, lint
+from .standards import AUTHORING, discover_project_standards, lint
 from .stages import StageManifest, CREATE_EVENTS
 
 STRING = {"type": "string", "minLength": 1}
@@ -199,7 +199,9 @@ def run(args):
         raise RefinerError("Select a controller backend with --config or --agent-command")
     if not config and not args.engine_config and args.engine is None:
         raise RefinerError("Select an evaluation backend with --config, --engine-config or --engine")
-    for reference in args.spec + args.standard:
+    standard_target = getattr(args, "destination", None) or getattr(args, "output", None)
+    standard_paths = discover_project_standards(standard_target, getattr(args, "standard", ()), Path.cwd())
+    for reference in args.spec + standard_paths:
         if not Path(reference).is_file():
             raise RefinerError("Reference file does not exist: " + reference)
     work = Path(args.output).resolve() if args.output else Path.cwd() / '.refiner-runs' / (
@@ -217,7 +219,7 @@ def run(args):
     agent.max_calls, agent.deadline = args.max_agent_calls, deadline
     inputs = {"business_description": args.description or "", "requested_name": args.name,
               "requirements": [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec],
-              "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.standard]}
+              "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in standard_paths]}
     resumed_analysis, resumed_draft, resumed_suite = None, None, None
     if resume:
         previous_inputs = read_json(resume/'inputs.json')
@@ -225,7 +227,7 @@ def run(args):
         previous_lock = read_json(resume/'business.lock.json')
         if previous_lock['sha256'] != digest({'inputs':previous_inputs,'analysis':resumed_analysis}) or previous_lock['input_sha256'] != digest(previous_inputs):
             raise RefinerError('Resume business contract hash mismatch')
-        if (args.description or args.spec or args.standard or args.name) and inputs != previous_inputs:
+        if (args.description or args.spec or standard_paths or args.name) and inputs != previous_inputs:
             raise RefinerError('Resume requires identical original business inputs; start a new creation for changed requirements')
         inputs = previous_inputs
         previous_state = read_json(resume/'state.json')

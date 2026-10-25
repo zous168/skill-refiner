@@ -12,7 +12,8 @@ from .standards import lint
 
 def workflow_options(parser, *, creating=False):
     parser.add_argument("--spec", action="append", default=[], help="Independent business requirements (repeatable)")
-    parser.add_argument("--standard", action="append", default=[], help="Additional authoring standards (repeatable)")
+    parser.add_argument("--standard", action="append", default=[],
+                        help="Additional standards; project standards are auto-discovered (repeatable)")
     parser.add_argument("--output", help="New evidence workspace; must not already exist")
     parser.add_argument("--config", help="Independent analysis/creation/planning/repair/review and regression backends")
     parser.add_argument("--skill-up", help="Explicit skill-up executable")

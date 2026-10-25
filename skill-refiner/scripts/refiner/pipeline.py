@@ -16,7 +16,7 @@ from .common import (Cancelled, RefinerError, digest, inventory, manifest, read_
 from .schemas import PLAN, PLAN_REVIEW, REPAIR, REVIEW
 from .evidence import repair_evidence
 from .skillup import SkillUp
-from .standards import AUTHORING, lint
+from .standards import AUTHORING, discover_project_standards, lint
 from .profiles import load_config
 from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
@@ -499,7 +499,8 @@ def run(args):
     source = Path(args.target).resolve()
     if not (source / "SKILL.md").is_file():
         raise RefinerError(f"No SKILL.md in {source}")
-    for reference in args.spec + args.standard:
+    standard_paths = discover_project_standards(source, getattr(args, "standard", ()))
+    for reference in args.spec + standard_paths:
         if not Path(reference).is_file():
             raise RefinerError(f"Reference file does not exist: {reference}")
     work = Path(args.output).resolve() if args.output else source.parent / (
@@ -525,7 +526,7 @@ def run(args):
     context.update(getattr(args, "creation_context", {}))
     for path in args.spec:
         context["requirements"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
-    for path in args.standard:
+    for path in standard_paths:
         context["standards"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
     write_json(work / "inputs.json", context)
     stages = StageManifest(work, "refine")

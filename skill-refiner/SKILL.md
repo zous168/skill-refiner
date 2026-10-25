@@ -40,8 +40,12 @@ Create a unique task directory outside the target, such as a project-local
 `.refiner-runs/<target>-<timestamp>/`, containing `inputs/` and a not-yet-created
 `run/`. If the current project is inside the target, use a sibling directory.
 Record the user's prose in `inputs/requirements.md`; pass supplied requirement
-files directly with repeatable `--spec`. Pass supplied standards with `--standard`.
-The pipeline already includes its baseline authoring standard.
+files directly with repeatable `--spec`. Project standards are loaded by default
+from `PROJECT-STANDARDS.md` and `.skill-refiner/standards/*.md` along the current
+project and target paths, bounded by their repository/project roots. Use repeatable
+`--standard` only to add further standards. Discovered and explicit standards are
+saved and hash-frozen with the run. The pipeline also includes its baseline
+Agent Skill authoring standard.
 
 When `references/local-runtime.json` exists, invoke this Skill's absolute
 `scripts/launch.py` with `python3`, from any project:
@@ -111,7 +115,8 @@ preserved; only `created` means creation passed all gates. Use
      --config /path/to/backends.json
    ```
 
-   Both reference options are optional and repeatable. Without external requirements,
+   `--spec` and additional `--standard` options are optional and repeatable. Project
+   standards are auto-discovered by default. Without external requirements,
    results demonstrate the Skill's own contract, not independent business correctness.
    Select at least one controller adapter and evaluation engine explicitly. In
    the standard managed setup, read [backend configuration](references/backends.md),

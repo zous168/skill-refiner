@@ -24,4 +24,4 @@ For example, an image request file can be:
 {"operation":"t2i","model":"DISCOVERED_GATEWAY_ALIAS","quantity":1,"prompt":"a red paper crane on a white table","output_dir":"./csp-media-output"}
 ```
 
-Run `python3 "$SKILL_ROOT/scripts/verify_contract.py"` to test the actual client against a local fake gateway. This is local mock evidence only; it does not prove live CSP generation. State that live generation is unverified unless an authorized real request was actually submitted.
+The source project maintains a local fake-gateway contract test at `tests/verify_contract.py`; project maintainers can run it from the repository root after building the Skill. It is local mock evidence only and does not prove live CSP generation. State that live generation is unverified unless an authorized real request was actually submitted.

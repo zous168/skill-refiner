@@ -8,6 +8,80 @@ import yaml
 from .common import files
 
 
+PROJECT_MARKERS = (
+    "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "Makefile",
+    "setup.cfg", "PROJECT-STANDARDS.md", ".skill-refiner/standards",
+)
+
+
+def _project_chain(start):
+    """Return directories from the project boundary through start, root first."""
+    path = Path(start).expanduser().resolve()
+    if path.is_file():
+        path = path.parent
+    ancestors = []
+    current = path
+    git_root = None
+    marker_root = None
+    while True:
+        ancestors.append(current)
+        if (current / ".git").exists():
+            git_root = current
+            break
+        if marker_root is None and any((current / marker).exists() for marker in PROJECT_MARKERS):
+            marker_root = current
+        if current.parent == current:
+            break
+        current = current.parent
+
+    boundary = git_root or marker_root or path
+    selected = []
+    for directory in ancestors:
+        selected.append(directory)
+        if directory == boundary:
+            break
+    return list(reversed(selected))
+
+
+def discover_project_standards(target=None, explicit=(), working_dir=None):
+    """Discover conventional project standards and append explicit additions.
+
+    Discovery walks the current project and target project independently. In a Git
+    checkout it is bounded by the repository root; outside Git it is bounded by the
+    nearest conventional project marker, or the starting directory itself.
+    """
+    bases = [Path(working_dir or Path.cwd()).expanduser().resolve()]
+    if target is not None:
+        bases.append(Path(target).expanduser().resolve())
+    directories = []
+    seen_directories = set()
+    for base in bases:
+        for directory in _project_chain(base):
+            if directory not in seen_directories:
+                directories.append(directory)
+                seen_directories.add(directory)
+
+    discovered = []
+    seen_paths = set()
+    for directory in directories:
+        candidates = [directory / "PROJECT-STANDARDS.md"]
+        standard_dir = directory / ".skill-refiner" / "standards"
+        if standard_dir.is_dir():
+            candidates.extend(sorted(standard_dir.glob("*.md")))
+        for candidate in candidates:
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                if resolved not in seen_paths:
+                    discovered.append(str(resolved))
+                    seen_paths.add(resolved)
+    for candidate in explicit or ():
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved not in seen_paths:
+            discovered.append(str(resolved))
+            seen_paths.add(resolved)
+    return discovered
+
+
 AUTHORING = """Maintain the user's scope and public input/output contract. Make trigger descriptions
 specific. Keep the entrypoint focused and put substantial conditional details in discoverable
 references. Explain important decisions; avoid arbitrary mandatory headings, length padding,

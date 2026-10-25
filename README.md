@@ -18,6 +18,10 @@ archives under `.refiner-runs/`, downloaded tools and virtual environments are
 excluded from Git. Evidence links into `.refiner-runs/` in the detailed historical
 reports resolve only in the original verification workspace.
 
+The separate [CSP Media project](csp-media/README.md) keeps its Skill source,
+project-level fake-gateway tests and reproducible build together. Its installable
+Skill artifact is `csp-media/dist/csp-media/`.
+
 The historical 0.2 integrated real self-audit ended `unchanged` with complete Codex/native-child workflows. It includes a native Agent-generated repair and explicit engineering integration, with frozen suites and raw evidence. See [SELF-REFINEMENT.md](SELF-REFINEMENT.md) for results, earlier failed attempts and limits.
 
 ## Install
@@ -100,8 +104,10 @@ For a new business workflow, describe it directly:
 > 帮我创建一个订单备货业务流 Skill：……业务规则……。自主分析流程、编写实现，
 > 规划正常、边界、异常测试，修复优化并做多引擎回归，保留证据。
 
-Prose requirements are saved as run inputs; you can also supply requirement and
-standard file paths. The installed launcher defaults to Codex planning/review,
+Prose requirements are saved as run inputs; project standards are auto-discovered
+from `PROJECT-STANDARDS.md` and `.skill-refiner/standards/*.md` in the project and
+target paths. Use `--standard` only for additional standards. Requirements and
+discovered standards are frozen into each run. The installed launcher defaults to Codex planning/review,
 native-child repair and both execution modes for regression/acceptance. Defaults
 are bounded to 3 repair rounds, 24 role calls, 100 evaluations and 3600 seconds;
 explicit user budgets override them. The original Skill is preserved, with a

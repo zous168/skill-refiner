@@ -10,5 +10,7 @@ __pycache__/
 !.env.example
 build/
 dist/
+!csp-media/dist/
+!csp-media/dist/**
 .pytest_cache/
 
