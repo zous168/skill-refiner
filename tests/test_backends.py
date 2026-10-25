@@ -16,8 +16,8 @@ from refiner.checks import check_one
 from refiner.common import RefinerError, manifest, snapshot, write_json, run_process
 from refiner.matrix import Matrix
 from refiner.pipeline import compare_candidate
-from refiner.profiles import load_config
-from refiner.runtime import native_rollouts, parse_codex, parse_cursor, run_api
+from refiner.profiles import load_config, validate_profile
+from refiner.runtime import native_rollouts, parse_codex, parse_cursor, run_api, run_cli
 from refiner.skillup import SkillUp
 from refiner.execute import verify_skill
 
@@ -26,6 +26,38 @@ FIXTURE = ROOT / "tests/fixtures"
 
 
 class ProfilesAndEvidence(unittest.TestCase):
+    def test_codex_sandbox_is_configurable_for_executor_but_planning_stays_read_only(self):
+        profile = {"backend": "codex", "executable": "/fake/codex", "codex_sandbox": "danger-full-access"}
+        self.assertEqual(validate_profile(dict(profile, id="test"), executor=True)["codex_sandbox"], "danger-full-access")
+        events = '\n'.join([json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}),
+                            json.dumps({"type": "turn.completed"})])
+        with tempfile.TemporaryDirectory() as tmp, patch("refiner.runtime.run_process", return_value=(0, events, "", 0.1)) as process:
+            run_cli(profile, "complete task", tmp, 10)
+            self.assertIn(["--sandbox", "danger-full-access"],
+                          [process.call_args.args[0][i:i + 2] for i, arg in enumerate(process.call_args.args[0][:-1])
+                           if arg == "--sandbox"])
+            run_cli(profile, "plan task", tmp, 10, planning=True)
+            argv = process.call_args.args[0]
+            sandbox_at = argv.index("--sandbox")
+            self.assertEqual(argv[sandbox_at + 1], "read-only")
+        for invalid in [dict(profile, codex_sandbox="unrestricted"),
+                        {"backend": "cursor", "id": "cursor", "codex_sandbox": "workspace-write"}]:
+            with self.assertRaises(RefinerError):
+                validate_profile(invalid, executor="id" in invalid)
+
+    def test_codex_nonzero_command_event_preserves_exit_code_for_output_checks(self):
+        output = '{"status":"error","error":{"code":"missing_key"}}'
+        events = [
+            {"type": "item.completed", "item": {"type": "command_execution", "id": "missing-key",
+             "command": "python3 scripts/csp_media.py models", "exit_code": 3, "aggregated_output": output}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": output}},
+            {"type": "turn.completed"},
+        ]
+        final, trace = parse_codex(events)
+        check = {"type": "tool_output_matches", "value": r"python3.*scripts/csp_media\.py models",
+                 "expected_exit_code": 3}
+        self.assertTrue(check_one(check, final, ROOT, trace)[0])
+
     def test_agent_refuses_to_silently_select_a_vendor_backend(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent = Agent(Path(tmp) / "run")

@@ -83,8 +83,10 @@ controller's concrete versioned contracts and context budget.
 Map every required behavior to at least one executable check. Plan concrete normal,
 boundary, and error cases where applicable, including configuration and help-request
 paths when they affect behavior. Define observable inputs, expected outputs, and
-independent checks. Keep the source requirements and test plan frozen before repair;
-do not let the implementation author see held-out acceptance cases.
+independent checks. Keep the source requirements and test plan frozen before repair.
+Do not show acceptance cases to the implementation author before the candidate passes
+development; if the candidate fails final acceptance, expose only failed cases and
+their evidence to repair, then rerun the complete frozen acceptance suite.
 
 ## 6. Run, diagnose, repair, and regress
 
@@ -99,10 +101,13 @@ Each model call receives a stage-specific request envelope and structured respon
 schema. Keep the serialized handoff within the configured byte budget; if it does not
 fit, the controller saves and rejects the request with evidence instead of truncating
 it. Split oversized work along requirement or component boundaries while preserving
-the original frozen test contract and keeping held-out acceptance inputs out of repair.
+the original frozen test contract and keeping acceptance inputs out of pre-acceptance
+repair. After a failed acceptance run, only its failed cases become repair evidence.
 
 After each repair, rerun affected cases, the full suite, and previously passing cases.
-Then run fresh independent acceptance and compare engines on the same case set. An
+Then run fresh independent acceptance and compare engines on the same case set. If
+acceptance fails, route its failing cases into another evidence-bound repair and repeat
+development regression and the complete acceptance suite. An
 unavailable engine or failed execution is an error, not a pass. Stop when the bounded
 budget is exhausted, preserve evidence, and report exactly what remains unverified.
 

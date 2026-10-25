@@ -13,7 +13,7 @@ from .common import RefinerError, run_process, write_json
 
 
 class Agent:
-    """Fresh role contexts; acceptance cases are omitted from repair requests."""
+    """Fresh role contexts; acceptance stays hidden until a qualified candidate fails it."""
 
     def __init__(self, work, command=None, timeout=240, config=None):
         self.work = Path(work)

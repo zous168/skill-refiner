@@ -158,8 +158,9 @@ preserved; only `created` means creation passed all gates. Use
   executor must pass regression and acceptance; an unavailable engine is ERROR.
 - Retain demonstrated partial improvements for the next round. A repairer's
   unresolved report still blocks final qualification; it is not a new standards
-  finding. Supply bounded, hash-identified failure artifacts to the next repair,
-  without exposing the controller's held-out acceptance cases.
+  finding. Supply bounded, hash-identified failure artifacts to the next repair.
+  Acceptance inputs stay hidden until a qualified candidate fails; then expose only
+  failed acceptance cases and rerun the full suite after regression.
 - Accept only after independent acceptance tasks pass and material standards
   findings are resolved. Stop on exhausted budgets, environment errors, unresolved
   coverage or repeated lack of improvement; report the remaining work accurately.

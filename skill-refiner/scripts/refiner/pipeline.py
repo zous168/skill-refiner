@@ -18,8 +18,61 @@ from .evidence import repair_evidence
 from .skillup import SkillUp
 from .standards import AUTHORING, lint
 from .profiles import load_config
-from .matrix import Matrix
+from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
+
+
+HELPER_EXECUTION_AUDIT = """For every Python helper supplied in case files, inspect its executable source line by line and
+trace the full control flow through every assertion to the final stdout and evidence writes. Check
+that all assertions can be true together for the documented client behavior and fake-gateway
+responses. Track the case working directory and path anchoring explicitly: Path.iterdir() or glob()
+on a relative base yields relative paths, which will not equal an absolute saved_paths value unless
+both sides are normalized. Verify artifact counts, directory contents, ordering and cleanup against
+the exact operations performed. A correct target must not fail because its test helper compares
+incompatible path forms or has contradictory expected outputs. Put the concrete helper assertion
+and path/control-flow reasoning in the independent case review basis; do not accept only the
+planner's summary of what the helper claims to verify."""
+
+
+CONVERSATIONAL_JSON_AUDIT = """Do not invent a JSON response schema or a string-only collection field solely to make grading
+convenient when the Skill contract asks for ordinary conversation. Prefer checking natural-language
+answers directly. If a test needs JSON, state every checked field type in the prompt. json_path_regex requires its pointer to resolve
+to a string, so do not apply it to an array such as a natural list of
+clarification questions. For an unconstrained collection, accept reasonable string or array forms
+with whole-response semantic checks; use exact array checks only when the business contract specifies
+all elements. A string good_response does not establish a string-only output contract. Also accept
+ordinary equivalent phrasing: a request to generate a video from a text description expresses
+text-to-video even when it does not say the token `t2v` or the literal phrase “text-to-video”. Use
+structured operation fields when exact operation labels are needed, and do not make natural-language
+checks depend on one product-specific term. For alias and capability explanations, assert the
+relationship between each exact alias and its returned operation; nearby words assigned to a
+different alias must not pass. Make bad_response reverse the relevant alias-operation relationship,
+and confirm the oracles reject it before freezing the case. For natural-language response checks,
+include at least two distinct good-response paraphrase controls, including ordinary wording likely
+used by another capable agent. Validate every good control against every response oracle and ensure
+the bad control still contradicts a required behavior."""
+
+
+CAPABILITY_ABSENCE_AUDIT = """For exact alias-scoped capability absence, accept semantically equivalent wording such as
+'未提供', '未列出', '不提供', '未返回', '不支持', or '没有'. Verify each positive wording against the
+alias-bounded assertion so one alias's sentence cannot satisfy another alias's capability check."""
+
+NATURAL_LANGUAGE_ASSERTION_AUDIT = """For natural-language assertions, keep the related subject, action and negation within the same
+sentence or clause; do not let a phrase about a different action later in the response complete a broad
+regex. When a user supplies a specific URL, file or other resource, bind a no-use/no-submit assertion to
+that supplied resource; a statement about a different or unrelated resource must not satisfy it."""
+CONVERSATIONAL_JSON_AUDIT += "\n" + CAPABILITY_ABSENCE_AUDIT + "\n" + NATURAL_LANGUAGE_ASSERTION_AUDIT + "\n"
+
+
+INPUT_BOUNDARY_AUDIT = """For executable targets, inspect documented input channels and their decoding and validation paths. When
+the same request is accepted from a file and stdin, cover malformed JSON and malformed encoded bytes
+on the relevant channels with binary fixtures; assert the documented exit result and that rejection
+happens before external side effects. Do not infer byte-decoding behavior from JSON-value fixtures.
+Do not make a malformed-byte test pass by setting PYTHONIOENCODING to a strict decoder, setting
+PYTHONUTF8, changing locale/encoding variables, or configuring a test-only decoder policy in the
+subprocess environment. Remove inherited encoding overrides when needed, then test the target's
+documented behavior under ordinary runtime defaults. The target must return the documented input
+error itself and must not submit media; a harness-forced strict decoder masks that defect."""
 
 
 PLANNING = """Inspect every relevant supplied Skill file, executable implementation, references and
@@ -34,15 +87,70 @@ executing the bundled script is a required behavior. It inspects real tool-call 
 not the user's prompt. Installed paths vary across engines; do not invent an absolute/relative path
 spelling requirement. Tool checks recognize equivalent existing workspace file paths. Only set
 literal_command=true when the source contract explicitly requires a literal command/path spelling.
+Use tool_command_absent when a required clarification or permission gate forbids executing a particular
+submission command. Give control_command a concrete forbidden-command example; the checker proves no
+matching tool-call command appears and validates itself against that positive control.
+Use tool_call_absent when a task forbids tool actions, including non-command browser, network or upload
+tools. Its value matches recorded tool names and control_tool_name supplies a matching positive
+control. For a clarification-only task that must not call any tools, require that in the prompt and
+use a nonempty-name pattern such as .+; tool_command_absent alone cannot prove that no non-command
+tool was called. This checks observed tool calls, not network egress from an allowed command.
 When the response must preserve that script's output, use tool_output_matches
 in addition to a content assertion. Its value is a command regex and control_command is a concrete
 matching example invocation for positive/negative trace controls. This checks that the final JSON/text
-actually equals the successful tool output, rejecting manual correction of a defective script.
+actually equals the observed tool output, rejecting manual correction of a defective script. For an
+expected nonzero command result, set expected_exit_code to the documented status; the checker then
+requires that exact observed exit code as well as matching complete output. Do not set
+expected_exit_code=0: a successful tool-result status already proves success. Some skill-up adapter
+transcripts expose only success/failed and omit the numeric exit code; if a test must verify an exact
+nonzero subprocess code through such an adapter, use a fixture helper that captures the installed
+script's actual argv, exit code and complete stdout into structured evidence, then exits successfully.
+Assert that helper's complete observed result and the captured nonzero code.
+For paraphrasable user-facing explanations, do not require one literal adjective unless the contract
+does; use regex alternatives for materially equivalent explanations or assert structured choices and
+reasons instead of grading a single keyword.
+The planner's good_response is a synthetic checker control, not evidence that the Skill uses its
+labels. Ground every exact json_path_equal value for a status/state field in the documented Skill
+contract, or state that exact enum in the case prompt; otherwise omit that exact status check. When
+you introduce a JSON output shape for a conversational task, specify any required enum values in
+the prompt itself. Prefer checking the requested decision and question content without inventing
+an unconstrained status vocabulary.
+For clarification checks about concepts such as dimensions, include common equivalent wording from
+the target language and domain (for example width, height, pixels and resolution), not only the
+formal term. A correct question about width and height must pass a dimensions check.
+For an unspecified media quantity, include natural phrases such as 生成段数, 生成几段,
+需要几份 or the equivalent number-of-outputs wording; do not require only a fixed noun like 数量.
+For capability explanations, accept equivalent absence wording such as “no i2v capability,”
+“provides no image-to-video support,” “i2v is not listed,” or “only t2v is confirmed.” Pair
+user-facing explanation checks with structured evidence for requested and discovered operations;
+phrases such as “was not returned by discovery” or “does not appear in the catalog” also establish
+absence. Do not require a single negation phrase when the response clearly names the absent capability.
+For permission checks, include equivalent natural language such as “有权使用,” “允许使用,” and
+“已获得授权,” not only “授权” or “许可.” Build each prose assertion from the behavior required,
+not from one preferred wording; review the good_response and bad_response controls against the full
+semantic range rather than treating either sample as the only acceptable phrasing.
+For generated-media or similar requests, carry every user-specified subject and distinguishing
+attribute (such as color) into fixture validation and observed-submission assertions; do not accept
+an output that preserves the subject while dropping an explicit attribute.
+When explaining a change from image-to-video to text-to-video, a statement that the supplied URL or
+link will not be used as a reference, or that no image URL/reference field will be submitted or
+attached, clearly explains the lost image input. Treat that as equivalent to naming the image or
+photo; do not require the same source noun when the supplied URL uniquely identifies the input.
+Use json_path_regex to check paraphrasable text inside a specific JSON string field; its pattern
+matches the decoded field value, so embedded escaped quotes cannot truncate the assertion. Use regex
+for plain-text answers or when the assertion intentionally spans the whole serialized response.
+For duration questions, include natural wording such as 多长时间 and 需要多久 alongside 时长,
+多少秒 and other equivalent expressions. Do not require the user-facing response to repeat the
+formal field name.
 Use text_equal when exact non-whitespace response text is required. Insignificant
 JSON formatting differences are not missing coverage unless explicitly required by business rules.
 At least one case must have kind=normal and at least one kind=boundary, error or negative.
 Use only supported declarative checks. Provide good_response and clearly wrong bad_response controls
 for response checks. JSON checks should prefer json_path_equal if the output has optional fields.
+Use json_path_matches_file when a user-facing JSON field must exactly match a value captured in a
+workspace evidence file, such as a reported saved path. Its shape is
+{"type":"json_path_matches_file","pointer":"/response/path","path":"observed.json",
+"value":{"file_pointer":"/saved_path"}}; value.pointer is an accepted alias for file_pointer.
 For file checks use path (workspace relative). For JSON pointers use RFC6901 pointer. Record all
 required behaviors and map them to tests. Do not invent out-of-scope features. Report missing
 evidence or required binary/omitted files as coverage gaps. Only uncovered REQUIRED behaviors belong
@@ -69,13 +177,44 @@ permissively; a NaN fixture must not also violate an independent field/type rule
 Make output and trace contracts executable as written. json_equal/json_path_equal and
 tool_output_matches require a complete JSON response or unchanged stdout; a prompt must not
 permit extra prose, explanations, links or summaries that those checks reject. Say to return
-only the requested JSON/stdout. tool_command sees direct recorded tool-call commands, not
+only the requested JSON/stdout. JSON path checks may parse an embedded JSON object and therefore
+do not prove the whole answer contains only JSON; add an anchored whole-response format check when
+the contract requires JSON with no surrounding prose. tool_command sees direct recorded tool-call commands, not
 subprocess argv constructed inside a Python helper or heredoc. If a task legitimately delegates
 CLI execution to a verifier helper, check that helper's observable invocation and its independent
 captured-result assertions instead of adding an unobservable inner-command regex. A fixture
 verifier must inspect actual subprocess argv, exit status and output rather than return an
 unsubstantiated attestation. Avoid prescribing an arbitrary invocation style solely to satisfy
-a regex when equivalent execution is part of the allowed target behavior."""
+a regex when equivalent execution is part of the allowed target behavior. If a task prompt permits
+multiple invocation paths, checks must accept each permitted path or the prompt must require the
+specific path the check observes. Do not combine a permissive helper prompt with a direct-command-only
+trace regex.
+
+When a tool_command check is needed to prove a helper or script was run, require its standalone
+invocation explicitly in the case prompt and make setup inputs available as case files or separate
+setup steps. Do not require a direct invocation while allowing the executor to wrap it inside an
+inline Python program or heredoc. For example, if the check matches `python3 scenario_probe.py ...`,
+the case prompt must require that command form and provide request files so the executor does not
+need an inline program to construct them. Keep nested subprocess checks in the helper's own captured
+evidence, where they are observable.
+For json_path_matches_file, a dynamic example value in good_response is a control only: the plan
+validator builds temporary matching evidence from it to prove the bad_response is rejected. Do not
+require a fixed evidence fixture for values that are unknown until execution. Instead verify that
+the supplied helper or executable fixture actually writes the checked evidence file from observed
+execution results and that the case prompt requires returning the matching response value.
+When another file_json_path_equal check reads the same evidence file, include every checked pointer
+in the known-good file fixture with values that agree with good_response. The runtime helper may
+delete or overwrite that control fixture before recording fresh evidence; tell the case prompt to
+run the helper and return its observed output, not to use the fixture as runtime evidence.
+
+For tool_output_matches, good_response must be the COMPLETE observed stdout, including every
+field the actual source or fixture emits. A partial JSON object can satisfy separate field checks
+but is not a valid unchanged-output control. Derive the full response from the supplied implementation,
+fixture or recorded real run evidence. If the complete output cannot be justified, do not assert
+unchanged forwarding; use checks for the concrete observable fields instead."""
+PLANNING += "\n" + HELPER_EXECUTION_AUDIT + "\n"
+PLANNING += "\n" + CONVERSATIONAL_JSON_AUDIT + "\n"
+PLANNING += "\n" + INPUT_BOUNDARY_AUDIT + "\n"
 
 
 def validate_plan_review(review, plan):
@@ -137,12 +276,73 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2):
                            "conflicting cases false. Never approve solely because the surrounding prompt prohibits "
                            "edits while the fixture itself demands them. Separately assess response_contract_consistent: "
                            "JSON and unchanged-stdout checks reject extra prose, so reject prompts allowing optional "
-                           "explanations/links/summaries alongside the answer. Assess trace_checks_observable: tool_command "
-                           "only sees direct tool-call command strings. A CLI invoked through a helper's Python "
+                           "explanations/links/summaries alongside the answer. For every tool_output_matches check, "
+                           "compare good_response with the complete observed output justified by the supplied source, "
+                           "fixture or observed run evidence; reject every expected_exit_code=0 value because a success "
+                           "status is sufficient and adapters may omit numeric codes. When a command legitimately exits nonzero, ensure the selected "
+                           "adapter exposes its exact status or require a helper that records actual subprocess argv, "
+                           "exit code and stdout. Reject partial JSON controls even if individual field "
+                           "checks pass. For dynamic values such as saved paths, prefer json_path_matches_file "
+                           "to compare the response with captured evidence instead of checking only its shape. "
+                           "For paraphrasable user-facing explanations, reject regex or contains oracles that demand "
+                           "one exact adjective when equivalent wording fulfills the contract; require a justified "
+                           "alternation or structure the expected choices instead. For prose in JSON string fields, "
+                           "prefer json_path_regex, which matches decoded values and handles escaped quotes; reject "
+                           "field regexes that stop at an escaped quote. For duration questions, accept common "
+                           "wording such as 多长时间, 多长, 每段分别多长 or 需要多久 as well as 时长/秒数. Treat good_response as a "
+                           "synthetic control, never as evidence of the target's output "
+                           "vocabulary. Every exact status/state value must be stated in the case prompt or grounded "
+                           "in the documented Skill contract; implementation literals alone do not define the "
+                           "evaluated agent's response vocabulary. Otherwise reject the invented enum/check. If a test adds "
+                           "a conversational JSON response schema, its prompt must state the allowed status enum. "
+                           "For discovery explanations, count 'was not returned by discovery' and 'does not appear "
+                           "in the catalog' as valid absence wording. For consent checks, include '有权使用', "
+                           "'允许使用', and '已获得授权' as equivalent permission wording. Evaluate text checks "
+                           "against the complete meaning required, rather than requiring the synthetic good_response "
+                           "wording. When an alternative media mode needs user consent, ensure the question tells "
+                           "the user what material or capability will be dropped and retains the requested subject "
+                           "when the available source gives it. "
+                           "For missing media quantity, accept wording such as '生成段数', '生成几段', '每段分别多长' "
+                           "or '每段的时长', not only "
+                           "the generic noun '数量'. When the supplied reference URL is explicitly identified as "
+                           "the image input, accept 'this URL/link will not be used as a reference' or 'no image "
+                           "URL/reference field will be submitted or attached' as a clear explanation that the "
+                           "image is not used. Include equivalent Chinese such as '不提交图片 URL', '不附带参考图', "
+                           "'不将该链接作为图片输入', '不把该链接提交为参考图', or '不支持将图片作为生成输入'; "
+                           "do not require the word 'image' or 'photo' when the omitted input is explicit. "
+                           "For natural-language response checks, include multiple distinct good-response paraphrase "
+                           "controls, including wording likely used by another capable agent; validate every control "
+                           "against every response oracle and ensure the bad control still contradicts a required behavior. "
+                           "When a case requires JSON only, "
+                           "verify the checks reject prose before or after the JSON object; json_path_equal alone can "
+                           "pass on embedded JSON. "
+                           "Assess trace_checks_observable: tool_command and tool_command_absent see direct command strings, "
+                           "while tool_call_absent matches recorded tool names, including non-command tools. For a "
+                           "clarification-only task that explicitly forbids every tool call, require that in the prompt "
+                           "and use tool_call_absent with a nonempty-name pattern and control_tool_name; this proves "
+                           "no observed tool action occurred. It does not prove OS-level network isolation for an "
+                           "allowed command. A CLI invoked through a helper's Python "
                            "subprocess argv or heredoc is not observable as a literal shell CLI command. If that is "
                            "allowed by the task, an inner-command regex makes a valid execution fail; instead check "
                            "the visible helper and its actual captured-process assertions. Cite concrete prompt and "
-                           "checker pairs in the basis. Approve only a useful executable suite.",
+                           "checker pairs in the basis. Ensure each trace check accepts every invocation path the "
+                           "prompt allows. If tool_command is used for a helper, verify the case prompt requires its "
+                           "standalone invocation and supplies required setup files; a heredoc or inline wrapper can "
+                           "hide that invocation from the transcript. For dimensions and similar clarification "
+                           "concepts, accept common user wording such as width/height and resolution, not just the "
+                           "formal label. For generated media requests, verify the fixture checks all salient "
+                           "user-specified attributes in the actual submitted prompt, including color when given. "
+                           "For capability explanations, accept equivalent absence wording such as no i2v capability "
+                           "or provides no image-to-video support when structured checks independently establish "
+                           "the discovered and requested operations. "
+                           "For json_path_matches_file, good_response may contain dynamic example values: the plan "
+                           "validator synthesizes matching control evidence, while the runtime fixture must write "
+                           "the real observed evidence. Do not demand a static expected-path fixture for dynamic "
+                           "values. If file_json_path_equal checks inspect other fields in the same file, ensure the "
+                           "known-good files fixture supplies every checked pointer consistently with good_response; "
+                           "the runtime helper must overwrite/remove that control fixture and capture fresh evidence. "
+                           "Approve only a useful executable suite. " + HELPER_EXECUTION_AUDIT + " "
+                           + CONVERSATIONAL_JSON_AUDIT + " " + INPUT_BOUNDARY_AUDIT,
                            {"context": context, "plan": plan}, PLAN_REVIEW)
         try:
             validate_plan_review(review, plan)
@@ -272,6 +472,20 @@ def compare_candidate(baseline_passed, best_result, best_findings, current, curr
     before = (*score(best_result, best_findings), len(best_unresolved))
     after = (*score(current, current_findings), len(current_unresolved))
     return not regressed and after < before, regressed
+
+
+def combine_results(development, acceptance):
+    """Compare a candidate across both frozen suites without conflating case IDs."""
+    if acceptance is None:
+        return development
+    extra = []
+    for row in acceptance.get("cases", []):
+        case_id = row.get("case_id", row["id"])
+        extra.append({**row, "id": f"acceptance::{case_id}", "case_id": case_id,
+                      "suite": "acceptance"})
+    return {**development, "passed": development.get("passed", False) and acceptance.get("passed", False),
+            "cases": [*development.get("cases", []), *extra],
+            "acceptance_report": acceptance.get("upstream_report")}
 
 
 def run(args):
@@ -448,7 +662,8 @@ def run(args):
                                  "and unresolved issues if repair cannot be justified. unresolved lists only remaining "
                                  "required behaviors, not intentional scope exclusions. The controller runs your patch "
                                  "afterwards: not having executed it yourself is not an unresolved behavior. "
-                                 "Use only allowed_evidence_ids, not requirement IDs. You do not see acceptance cases.",
+                                 "Use only allowed_evidence_ids, not requirement IDs. Held-out acceptance cases are omitted "
+                                 "until the candidate first qualifies on the development suite.",
                                  {"files": inventory(best, max_bytes=120_000,
                                                      priority_paths=linked_source_paths(best, errors)),
                                   "requirements": plan["requirements"],
@@ -502,12 +717,141 @@ def run(args):
         if not qualifies(best_result, best_findings, best_unresolved):
             event("not_converged", best_candidate=str(best), unresolved=best_unresolved)
             return state
-        event("acceptance")
-        final_checks = evaluate(best, acceptance["cases"], work / "acceptance")
+        acceptance_dir = work / "acceptance"
+        acceptance_dir.mkdir(parents=True, exist_ok=True)
+        def acceptance_target(target, label):
+            target_manifest = manifest(target)
+            record = {"candidate": target.resolve().relative_to(work.resolve()).as_posix(),
+                      "candidate_manifest": target_manifest,
+                      "candidate_sha256": digest(target_manifest),
+                      "suite_sha256": digest(acceptance["cases"])}
+            attempt_dir = acceptance_dir / "attempts" / label
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            write_json(attempt_dir / "target.json", record)
+            return record, attempt_dir
+
+        accepted_manifest, initial_acceptance_dir = acceptance_target(best, "initial")
+        write_json(acceptance_dir / "target.json", accepted_manifest)
+        event("acceptance", attempt="initial")
+        final_checks = evaluate(best, acceptance["cases"], initial_acceptance_dir / "evaluation")
+        write_json(acceptance_dir / "summary.json", final_checks)
         budget()
-        if not final_checks["passed"]:
-            event("failed_acceptance", best_candidate=str(best))
+        if any(row["status"] == "ERROR" for row in final_checks["cases"]):
+            event("execution_error", message="Resolve acceptance engine/environment errors before modifying the Skill")
             return state
+
+        # An independent acceptance failure is actionable evidence. Route only its failed cases
+        # back through the same evidence-bound repair and full development regression gates.
+        for number in range(len(state["rounds"]) + 1, args.max_rounds + 1):
+            if final_checks["passed"] and not best_unresolved:
+                break
+            failing_acceptance = [row for row in final_checks["cases"] if not row["passed"]]
+            if not failing_acceptance and not best_unresolved:
+                break
+            event("repairing", round=number, trigger="acceptance")
+            round_dir = work / "iterations" / f"round-{number}"
+            round_dir.mkdir(parents=True, exist_ok=True)
+            scoped_failures = []
+            for row in failing_acceptance:
+                case_id = row.get("case_id", row["id"])
+                scoped_failures.append({**row, "id": f"acceptance::{case_id}",
+                                        "case_id": case_id, "suite": "acceptance"})
+            unresolved_evidence = [{"id": f"U-{i+1:03}", "message": issue,
+                                    "origin": "previous repair report; not a standards finding"}
+                                   for i, issue in enumerate(best_unresolved)]
+            evidence_ids = ({row["id"] for row in scoped_failures}
+                            | {finding["id"] for finding in best_findings if finding["severity"] == "error"}
+                            | {item["id"] for item in unresolved_evidence})
+            repair_schema = copy.deepcopy(REPAIR)
+            repair_schema["properties"]["changes"]["items"]["properties"]["evidence_ids"]["items"]["enum"] = sorted(evidence_ids)
+            response = agent.ask(
+                "repair",
+                "Diagnose these failures from the independently planned acceptance suite against the frozen "
+                "requirements and cited source material. The exact failed acceptance cases are included because "
+                "a previously qualified candidate failed final acceptance. Return narrow full-file replacements "
+                "only for demonstrated target defects. Preserve identity, scope and valid behavior; fix supporting "
+                "scripts when they cause a failure. Never edit tests, plans, requirements or grading criteria, and "
+                "never hardcode fixture inputs or expected answers. If an observed response already satisfies the "
+                "contract but a narrow oracle rejects equivalent wording, do not change target output to appease it; "
+                "return changes=[] and describe the oracle problem as unresolved. Use only allowed_evidence_ids, "
+                "not requirement IDs. The controller will run the complete development regression suite and rerun "
+                "acceptance after applying a patch.",
+                {"files": inventory(best, max_bytes=120_000,
+                                    priority_paths=linked_source_paths(best, [])),
+                 "requirements": plan["requirements"],
+                 "requirement_sources": source_references(context["requirements"], "requirement"),
+                 "standard_sources": source_references(context["standards"], "standard"),
+                 "allowed_evidence_ids": sorted(evidence_ids),
+                 "failures": scoped_failures,
+                 "acceptance_failures": scoped_failures,
+                 "findings": [finding for finding in best_findings if finding["severity"] == "error"],
+                 "previous_unresolved": unresolved_evidence,
+                 "failure_evidence": repair_evidence(scoped_failures, max_bytes=60_000),
+                 "failing_cases": [case for case in acceptance["cases"]
+                                   if case["id"] in {row["case_id"] for row in scoped_failures}]},
+                repair_schema)
+            write_json(round_dir / "changes.json", response)
+            if not response["changes"]:
+                event("failed_acceptance", best_candidate=str(best),
+                      failed_cases=[row.get("case_id", row["id"]) for row in final_checks["cases"] if not row["passed"]],
+                      unresolved=response["unresolved"], message="Acceptance repair produced no changes")
+                return state
+            candidate = work / "candidates" / str(number) / source.name
+            snapshot(best, candidate)
+            apply_changes(candidate, response, evidence_ids)
+            if manifest(candidate) == manifest(best):
+                event("failed_acceptance", best_candidate=str(best),
+                      failed_cases=[row.get("case_id", row["id"]) for row in final_checks["cases"] if not row["passed"]],
+                      unresolved=response["unresolved"], message="Acceptance repair did not change any source file")
+                return state
+            budget()
+            event("regression", round=number)
+            current = evaluate(candidate, plan["cases"], round_dir / "regression")
+            current_findings = standards_review(agent, candidate, context, round_dir, expected_name)
+            if any(row["status"] == "ERROR" for row in current["cases"]):
+                event("execution_error", message="Resolve regression engine/environment errors before continuing")
+                return state
+            candidate_acceptance_record, candidate_acceptance_dir = acceptance_target(candidate, f"round-{number}")
+            event("acceptance", attempt=f"round-{number}")
+            candidate_acceptance = evaluate(candidate, acceptance["cases"],
+                                            candidate_acceptance_dir / "evaluation")
+            budget()
+            if any(row["status"] == "ERROR" for row in candidate_acceptance["cases"]):
+                event("execution_error", message="Resolve acceptance engine/environment errors before continuing")
+                return state
+            before_result = combine_results(best_result, final_checks)
+            after_result = combine_results(current, candidate_acceptance)
+            accepted, regressed = compare_candidate(baseline_passed, before_result, best_findings,
+                                                    after_result, current_findings,
+                                                    best_unresolved, response["unresolved"])
+            state["rounds"].append({"number": number, "accepted": accepted,
+                                    "regressed_cases": regressed,
+                                    "score": score(after_result, current_findings),
+                                    "candidate": str(candidate),
+                                    "unresolved": response["unresolved"],
+                                    "retained_for_next_round": accepted,
+                                    "qualified_for_acceptance": (
+                                        qualifies(current, current_findings, response["unresolved"])
+                                        and candidate_acceptance["passed"]),
+                                    "trigger": "acceptance"})
+            if accepted:
+                best, best_result, best_findings = candidate, current, current_findings
+                best_unresolved = response["unresolved"]
+                final_checks = candidate_acceptance
+                write_json(acceptance_dir / "target.json", candidate_acceptance_record)
+                write_json(acceptance_dir / "summary.json", final_checks)
+                no_progress = 0
+            else:
+                no_progress += 1
+            write_json(work / "state.json", state)
+            if no_progress >= 2:
+                break
+        if not final_checks["passed"] or best_unresolved:
+            event("failed_acceptance", best_candidate=str(best),
+                  failed_cases=[row.get("case_id", row["id"]) for row in final_checks["cases"] if not row["passed"]],
+                  unresolved=best_unresolved)
+            return state
+        stages.complete("acceptance")
         final = work / "final" / source.name
         snapshot(best, final)
         patch = []
@@ -571,7 +915,9 @@ def write_report(work, state):
         if path.exists():
             result = read_json(path)
             if "engines" in result:
-                lines += [f"## {phase}", "", (path.parent / "comparison.md").read_text(), ""]
+                comparison = path.parent / "comparison.md"
+                rendered = comparison.read_text(encoding="utf-8") if comparison.is_file() else comparison_markdown(result)
+                lines += [f"## {phase}", "", rendered, ""]
                 continue
             lines += [f"## {phase}", "", "| Case | Status |", "|---|---|"]
             lines += [f"| {r['id']} | {r['status']} |" for r in result["cases"]]

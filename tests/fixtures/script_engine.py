@@ -6,14 +6,15 @@ import sys
 import shlex
 
 request = json.loads(Path(sys.argv[1]).read_text())
-scripts = list(Path.cwd().rglob("scripts/total.py"))
+workspace = Path(request.get("workspace", Path.cwd())).resolve()
+scripts = list(workspace.rglob("scripts/total.py"))
 if len(scripts) != 1:
-    raise RuntimeError(f"Expected exactly one installed target script; got {scripts}")
+    raise RuntimeError(f"Expected exactly one installed target script under {workspace}; got {scripts}")
 argv = [sys.executable, str(scripts[0]), "input.json"]
-if Path('refiner-python-probe.py').exists():
+if (workspace / 'refiner-python-probe.py').exists():
     argv = [sys.executable, 'refiner-python-probe.py', '--evidence', 'observed.json', '--track', 'input.json',
             '--protect-inputs', '--deny-network', '--deny-subprocess', str(scripts[0]), 'input.json']
-result = subprocess.run(argv, capture_output=True, text=True)
+result = subprocess.run(argv, cwd=workspace, capture_output=True, text=True)
 payload = {"exit_code": result.returncode, "final_message": result.stdout.strip(),
            "stderr": result.stderr, "transcript": [
                {"role": "tool_call", "tool_call": {"id": "exec-1", "name": "command_execution", "arguments": {

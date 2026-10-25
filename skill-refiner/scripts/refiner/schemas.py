@@ -4,12 +4,32 @@ CHECK = {
     "type": "object", "additionalProperties": False,
     "required": ["type", "value"],
     "properties": {
-        "type": {"enum": ["contains", "not_contains", "regex", "text_equal", "tool_command", "tool_output_matches", "json_equal", "json_sequence_equal", "json_path_equal",
-                           "file_exists", "file_contains", "file_text_equal", "file_json_equal", "file_json_path_equal"]},
+        "type": {"enum": ["contains", "not_contains", "regex", "text_equal", "tool_command", "tool_command_absent", "tool_call_absent", "tool_output_matches", "json_equal", "json_sequence_equal", "json_path_equal", "json_path_regex",
+                           "json_path_matches_file", "file_exists", "file_contains", "file_text_equal", "file_json_equal", "file_json_path_equal"]},
         "value": {}, "path": {"type": "string"}, "pointer": {"type": "string"},
-        "control_command": {"type": "string"},
+        "control_command": {"type": "string"}, "control_tool_name": {"type": "string"},
+        "expected_exit_code": {"type": "integer", "minimum": 0},
         "literal_command": {"type": "boolean"},
     },
+    "allOf": [{
+        "if": {"properties": {"type": {"const": "json_path_matches_file"}}},
+        "then": {
+            "required": ["path", "pointer"],
+            "properties": {"value": {
+                "type": "object",
+                "oneOf": [
+                    {"required": ["file_pointer"], "properties": {"file_pointer": {"type": "string"}}},
+                    {"required": ["pointer"], "properties": {"pointer": {"type": "string"}}},
+                ],
+            }},
+        },
+    }, {
+        "if": {"properties": {"type": {"const": "json_path_regex"}}},
+        "then": {"required": ["pointer"], "properties": {"value": {"type": "string"}}},
+    }, {
+        "if": {"properties": {"type": {"const": "tool_call_absent"}}},
+        "then": {"required": ["control_tool_name"], "properties": {"value": {"type": "string"}}},
+    }],
 }
 CASE = {
     "type": "object", "additionalProperties": False,
@@ -23,7 +43,9 @@ CASE = {
         "helpers": {"type": "array", "uniqueItems": True, "items": {"enum": ["python_probe"]}},
         "checks": {"type": "array", "minItems": 1, "items": CHECK},
         "oracle_reason": {"type": "string", "minLength": 12},
-        "good_response": {"type": "string"}, "bad_response": {"type": "string"},
+        "good_response": {"type": "string"},
+        "good_responses": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
+        "bad_response": {"type": "string"},
     },
 }
 PLAN = {

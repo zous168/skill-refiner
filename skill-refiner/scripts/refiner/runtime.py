@@ -40,10 +40,12 @@ def json_lines(text):
     return rows
 
 
-def tool_pair(call_id, name, args, output, success):
+def tool_pair(call_id, name, args, output, success, exit_code=None):
+    result = {"call_id": call_id, "status": "success" if success else "error", "content": output}
+    if exit_code is not None:
+        result["exit_code"] = exit_code
     return [{"role": "tool_call", "tool_call": {"id": call_id, "name": name, "arguments": args}},
-            {"role": "tool_result", "tool_result": {"call_id": call_id,
-             "status": "success" if success else "error", "content": output}}]
+            {"role": "tool_result", "tool_result": result}]
 
 
 def command_record(item, prefix=""):
@@ -53,7 +55,7 @@ def command_record(item, prefix=""):
     if not isinstance(command, str) or item.get("exit_code") is None:
         return []
     return tool_pair(prefix + str(item.get("id", "command")), "command_execution", {"command": command},
-                     item.get("aggregated_output", ""), item["exit_code"] == 0)
+                     item.get("aggregated_output", ""), item["exit_code"] == 0, item["exit_code"])
 
 
 def parse_codex(events):
@@ -97,7 +99,7 @@ def parse_cursor(events):
                 code = success.get("exitCode", success.get("exit_code"))
                 output = success.get("stdout", success.get("output"))
                 if code is not None and isinstance(output, str):
-                    trace += tool_pair(str(e.get("call_id")), name, {"command": command}, output, code == 0)
+                    trace += tool_pair(str(e.get("call_id")), name, {"command": command}, output, code == 0, code)
     if not done:
         raise RefinerError("Cursor returned no successful terminal result; check login and version")
     return final, trace
@@ -166,7 +168,8 @@ def run_cli(profile, prompt, cwd, timeout, *, planning=False):
     if backend in {"codex", "codex_subagent"}:
         native = backend == "codex_subagent"
         argv = [executable(profile, "codex"), "exec", "--skip-git-repo-check", "--sandbox",
-                "read-only" if planning else "workspace-write", "--color", "never", "--json"]
+                "read-only" if planning else profile.get("codex_sandbox", "workspace-write"),
+                "--color", "never", "--json"]
         if not native:
             argv += ["--ephemeral"]
         else:
@@ -306,6 +309,7 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
             name = call["function"]["name"]
             args = json.loads(call["function"]["arguments"])
             success, output = True, ""
+            exit_code = None
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -314,6 +318,7 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
                     code, out, err, _ = run_process(["/bin/sh", "-c", args["command"]], cwd=cwd,
                                                    timeout=min(remaining, 60))
                     success, output = code == 0, out + err
+                    exit_code = code
                 elif name == "read_file":
                     output = relative_path(cwd, args["path"]).read_text()
                 elif name == "write_file":
@@ -326,7 +331,7 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
             except (OSError, RefinerError, KeyError) as exc:
                 success, output = False, str(exc)
             output = output[:100_000]
-            trace += tool_pair(call["id"], name, args, output, success)
+            trace += tool_pair(call["id"], name, args, output, success, exit_code)
             messages.append({"role": "tool", "tool_call_id": call["id"],
                              "content": json.dumps({"success": success, "output": output})})
     raise RefinerError("Model exhausted max_turns without a final answer")

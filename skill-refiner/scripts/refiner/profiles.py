@@ -12,7 +12,9 @@ ROLES = {"analyze": "planning", "analysis-review": "review", "draft": "creation"
          "plan": "planning", "acceptance-plan": "planning", "repair": "repair",
          "plan-review": "review", "standards-review": "review"}
 FIELDS = {"id", "backend", "model", "executable", "command", "base_url", "api_key_env",
-          "max_turns", "timeout", "max_request_bytes", "reasoning_effort", "child_model", "engine", "request_options"}
+          "max_turns", "timeout", "max_request_bytes", "reasoning_effort", "child_model", "engine",
+          "request_options", "codex_sandbox"}
+CODEX_SANDBOXES = {"read-only", "workspace-write", "danger-full-access"}
 
 
 def validate_profile(profile, *, executor=False):
@@ -32,6 +34,11 @@ def validate_profile(profile, *, executor=False):
     for key in ("model", "executable", "base_url", "api_key_env", "reasoning_effort", "child_model"):
         if key in p and (not isinstance(p[key], str) or not p[key].strip()):
             raise RefinerError(f"Profile {key} must be a nonempty string")
+    if "codex_sandbox" in p:
+        if p["backend"] not in {"codex", "codex_subagent"}:
+            raise RefinerError("codex_sandbox applies only to Codex profiles")
+        if p["codex_sandbox"] not in CODEX_SANDBOXES:
+            raise RefinerError("codex_sandbox must be read-only, workspace-write or danger-full-access")
     if p["backend"] == "openai_compatible":
         from urllib.parse import urlsplit
         url = urlsplit(p.get("base_url", ""))

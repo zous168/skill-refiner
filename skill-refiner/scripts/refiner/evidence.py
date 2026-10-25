@@ -1,4 +1,4 @@
-"""Bounded excerpts of actual failing executions, never of the held-out suite."""
+"""Bounded excerpts from one actually executed failing case."""
 from __future__ import annotations
 
 import hashlib
@@ -129,7 +129,7 @@ def failure_bundle(upstream, case_id, max_bytes=40_000):
             if path.suffix not in {".json", ".jsonl", ".txt", ".md"} or path.stat().st_size > 4_000_000:
                 continue
             add(str(path), path.read_bytes())
-    return {"scope": "Artifacts of this executed case only; held-out controller cases are not loaded",
+    return {"scope": "Artifacts of this executed case only; neighboring cases and frozen plans are not loaded",
             "records": records, "omissions": omissions}
 
 

@@ -27,9 +27,11 @@ Native Codex subagent mode adds verified spawning and parent-linked child eviden
 ordinary role processes are not described as native subagents. Implementation and
 protocol tests do not establish live model availability. See the project's
 verification record for observed and blocked backends.
-The repair prompt contains no acceptance cases, and the acceptance set contains
-new task inputs. Small sets establish observed results, not a statistical confidence
-guarantee. Generated tests may themselves miss behaviors; inspect coverage artifacts.
+The repair prompt initially omits acceptance cases, and the acceptance set contains
+new task inputs. If a qualified candidate fails acceptance, only the failed acceptance
+cases and their raw execution evidence are exposed to repair; the full acceptance suite
+is rerun after regression. Small sets establish observed results, not a statistical
+confidence guarantee. Generated tests may themselves miss behaviors; inspect coverage artifacts.
 
 Upstream reuse: skill-up's execution/judging/report machinery is used as an external
 binary, pinned to v0.13.0 at initial implementation. Planning, patch control,

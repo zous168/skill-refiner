@@ -7,6 +7,7 @@ import difflib
 import json
 from pathlib import Path
 import re
+import shutil
 import time
 
 from .agent import Agent
@@ -239,6 +240,9 @@ def run(args):
                                         'reuses_verdicts':False}
         if (resume/'refinement/oracle.lock.json').is_file():
             resumed_suite = resume/'refinement'
+        review_path = resume / 'analysis-review.json'
+        if review_path.is_file():
+            shutil.copy2(review_path, work / 'analysis-review.json')
     write_json(work / "inputs.json", inputs)
     (work / 'inputs').mkdir()
     request_file = work / 'inputs/business-request.md'

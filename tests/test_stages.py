@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from refiner.common import write_json
 from refiner.stages import StageManifest
 from refiner.common import inventory
 
@@ -56,7 +57,11 @@ class StageManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "create-1"
             root.mkdir()
+            write_json(root / "inputs.json", {"business_description": "example"})
+            (root / "inputs").mkdir()
+            (root / "inputs/business-request.md").write_text("example\n")
             stages = StageManifest(root, "create")
+            stages.complete("inputs")
             stages.activate("analysis")
             stages.finish("needs_clarification")
             data = json.loads((root / "stages.json").read_text())
@@ -79,6 +84,76 @@ class StageManifestTests(unittest.TestCase):
                 self.assertEqual(by_path[path.relative_to(root).as_posix()]["sha256"],
                                  hashlib.sha256(expected).hexdigest())
                 self.assertEqual(by_path[path.relative_to(root).as_posix()]["bytes"], len(expected))
+
+    def test_required_outputs_block_stage_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run-1"
+            root.mkdir()
+            stages = StageManifest(root, "refine")
+            with self.assertRaisesRegex(ValueError, "missing required outputs"):
+                stages.complete("inputs")
+            data = json.loads((root / "stages.json").read_text())
+            self.assertEqual(data["stages"][0]["status"], "pending")
+
+    def test_repeated_event_does_not_complete_a_stage_before_its_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run-1"
+            root.mkdir()
+            (root / "inputs.json").write_text("{}\n")
+            (root / "original").mkdir()
+            (root / "original/SKILL.md").write_text("# Skill\n")
+            stages = StageManifest(root, "refine")
+            stages.complete("inputs")
+            stages.activate("planning")
+            stages.activate("planning")
+            data = json.loads((root / "stages.json").read_text())
+            self.assertEqual(data["stages"][1]["status"], "running")
+
+    def test_acceptance_failure_can_reopen_repair_regression_and_acceptance_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "run-acceptance-loop"
+            root.mkdir()
+            (root / "inputs.json").write_text("{}\n")
+            (root / "original").mkdir()
+            (root / "original/SKILL.md").write_text("# Skill\n")
+            (root / "test-plan.json").write_text('{"cases":[]}\n')
+            (root / "acceptance-plan.json").write_text('{"cases":[]}\n')
+            (root / "oracle.lock.json").write_text('{"sha256":"test"}\n')
+            stages = StageManifest(root, "refine")
+            stages.complete("inputs")
+            (root / "baseline").mkdir()
+            (root / "baseline/summary.json").write_text('{"cases":[]}\n')
+            (root / "baseline/standards.json").write_text('{"findings":[]}\n')
+            stages.activate("planning")
+            stages.activate("baseline")
+            stages.complete("baseline")
+            (root / "acceptance/attempts/initial/evaluation").mkdir(parents=True)
+            (root / "acceptance/attempts/initial/evaluation/summary.json").write_text('{"passed":false}\n')
+            (root / "iterations/round-1").mkdir(parents=True)
+            (root / "iterations/round-1/changes.json").write_text('{"changes":[]}\n')
+            (root / "candidates/1/skill").mkdir(parents=True)
+            (root / "candidates/1/skill/SKILL.md").write_text("# Candidate\n")
+            (root / "iterations/round-1/regression").mkdir()
+            (root / "iterations/round-1/regression/summary.json").write_text('{"cases":[]}\n')
+            (root / "iterations/round-1/standards.json").write_text('{"findings":[]}\n')
+            stages.activate("repair")
+            stages.activate("regression")
+            (root / "acceptance").mkdir(exist_ok=True)
+            (root / "acceptance/target.json").write_text('{}\n')
+            (root / "acceptance/summary.json").write_text('{"passed":false}\n')
+            stages.activate("acceptance")
+            stages.complete("acceptance")
+            (root / "acceptance/attempts/round-1/evaluation").mkdir(parents=True)
+            (root / "acceptance/attempts/round-1/evaluation/summary.json").write_text('{"passed":false}\n')
+            stages.activate("repair")
+            data = json.loads((root / "stages.json").read_text())
+            by_id = {stage["id"]: stage for stage in data["stages"]}
+            self.assertEqual(data["active_stage"], "repair")
+            self.assertEqual(by_id["repair"]["status"], "running")
+            self.assertEqual(by_id["acceptance"]["status"], "completed")
+            repair_inputs = {item["path"] for item in by_id["repair"]["input_artifacts"]}
+            self.assertIn("acceptance/attempts/initial/evaluation/summary.json", repair_inputs)
+            self.assertIn("acceptance/attempts/round-1/evaluation/summary.json", repair_inputs)
 
 
 if __name__ == "__main__":

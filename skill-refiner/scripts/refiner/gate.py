@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .common import RefinerError, digest, manifest, read_json
+from .stages import verify_stage_manifest
 
 
 def _required_file(root: Path, relative: str) -> Path:
@@ -73,6 +74,11 @@ def _verify_pipeline(root: Path, *, expected_status: set[str]) -> dict:
     state = read_json(_required_file(root, "state.json"))
     if state.get("status") not in expected_status:
         raise RefinerError(f"Run status is {state.get('status')!r}; a fully accepted status is required")
+    try:
+        verify_stage_manifest(root, mode="refine", run_status=state["status"],
+                              allow_active_verification=True)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise RefinerError(f"Stage contract verification failed: {exc}") from exc
     _required_file(root, "report.md")
     plan = read_json(_required_file(root, "test-plan.json"))
     acceptance = read_json(_required_file(root, "acceptance-plan.json"))
@@ -104,6 +110,17 @@ def _verify_pipeline(root: Path, *, expected_status: set[str]) -> dict:
         raise RefinerError("Candidate Skill no longer matches accepted evidence")
     if evidence.get("oracle_hash") != lock.get("sha256"):
         raise RefinerError("Accepted evidence refers to a different frozen test suite")
+    acceptance_target = read_json(_required_file(root, "acceptance/target.json"))
+    acceptance_candidate_ref = Path(acceptance_target.get("candidate", ""))
+    acceptance_candidate = (root / acceptance_candidate_ref).resolve()
+    if (acceptance_target.get("candidate_manifest") != candidate_manifest
+            or acceptance_target.get("candidate_sha256") != digest(candidate_manifest)
+            or acceptance_target.get("suite_sha256") != digest(acceptance["cases"])
+            or acceptance_candidate_ref.is_absolute()
+            or not acceptance_candidate.is_relative_to(root)
+            or not acceptance_candidate.is_dir()
+            or manifest(acceptance_candidate) != candidate_manifest):
+        raise RefinerError("Independent acceptance was not run against the delivered candidate and frozen suite")
 
     baseline_cases = {case["id"] for case in plan["cases"] if isinstance(case, dict) and isinstance(case.get("id"), str)}
     regression_cases = baseline_cases
@@ -150,6 +167,11 @@ def verify_run(path) -> dict:
     if state.get("mode") == "create":
         if state.get("status") != "created" or state.get("refinement_status") not in {"passed", "unchanged"}:
             raise RefinerError("Creation did not complete every refinement gate")
+        try:
+            verify_stage_manifest(root, mode="create", run_status=state["status"],
+                                  allow_active_verification=True)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            raise RefinerError(f"Creation stage contract verification failed: {exc}") from exc
         refinement_root = root / "refinement"
         verified = _verify_pipeline(refinement_root, expected_status={"passed", "unchanged"})
         create_final = Path(state.get("final_skill", "")).resolve()

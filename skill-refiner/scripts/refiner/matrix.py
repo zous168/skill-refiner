@@ -77,7 +77,7 @@ class Matrix:
         return aggregate
 
 
-def write_comparison(directory, result):
+def comparison_markdown(result):
     profiles = [e["executor"] for e in result["engines"]]
     cases = list(dict.fromkeys(r["case_id"] for r in result["cases"]))
     lookup = {(r["executor"], r["case_id"]): r["status"] for r in result["cases"]}
@@ -90,4 +90,8 @@ def write_comparison(directory, result):
         counts = [sum(r["status"] == status for r in engine["cases"]) for status in ("PASS", "FAIL", "ERROR")]
         lines.append(f"| {engine['executor']} | {counts[0]} | {counts[1]} | {counts[2]} | {engine.get('seconds', 'unknown')} | {engine['profile'].get('model', 'local-default')} |")
     lines += ["", "NOT_RUN and ERROR never count as a pass. Missing credentials and unsupported trace formats must be resolved before adoption."]
-    (Path(directory) / "comparison.md").write_text("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
+
+
+def write_comparison(directory, result):
+    (Path(directory) / "comparison.md").write_text(comparison_markdown(result))

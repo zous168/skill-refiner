@@ -16,7 +16,12 @@ function, and the applicable `failure_states`. Existing artifacts are recorded w
 SHA-256. Glob entries describe a set of files, such as regression output from each
 repair round. Status is one of `pending`, `running`, `completed`, `blocked`, or
 `skipped`. `stages.json` is an index and audit record; the referenced files remain
-the canonical stage data.
+the canonical stage data. A stage cannot become `completed` until its required inputs
+and outputs exist. The final verification gate checks the versioned stage sequence,
+required artifacts and recorded input/output hashes; deleting or changing a handoff
+after a stage completes invalidates verification. Reused plans, drafts and their call
+transcripts may be optional in the new run, but present evidence is still hashed and
+checked.
 
 Controller calls use `skill-refiner.agent-request/v1` JSON with `role`, `instruction`,
 `input`, and `response_schema`. Each call directory also contains
@@ -46,11 +51,11 @@ evidence remain in the run directory even when a role receives a bounded excerpt
 | Creation: first draft | Approved analysis and business lock | `drafts/` (Skill source files), `draft-manifest.json` (path-to-SHA-256 JSON) | Draft paths and static authoring checks pass |
 | Refinement: planning | Immutable Skill snapshot, requirements, standards, analysis contract | `test-plan.json`, `acceptance-plan.json`, `oracle.lock.json` (JSON) | Independent review approves executable coverage; acceptance uses fresh fixtures; plans and source hashes lock |
 | Refinement: baseline | Locked development plan and original Skill snapshot | `baseline/summary.json`, `baseline/standards.json` (JSON), backend logs/evidence | All configured engines return observed results; environment errors stop repair |
-| Repair | Failed-case results, material standards findings, frozen requirements, prioritized source excerpts | `iterations/round-N/changes.json` (JSON), candidate Skill files, call request/response manifests | Each changed file cites a failed case or finding; protected tests and oracles cannot be edited |
+| Repair | Failed-case results (including immutable per-attempt acceptance summaries after held-out failure), material standards findings, frozen requirements, prioritized source excerpts | `iterations/round-N/changes.json` (JSON), candidate Skill files, call request/response manifests | Each changed file cites a failed case or finding; protected tests and oracles cannot be edited |
 | Regression | Candidate, same frozen development suite, original passing-case set | `iterations/round-N/regression/summary.json`, `standards.json`, engine comparisons (JSON/Markdown) | No previously passing case regresses; each engine is judged separately |
-| Acceptance | Qualified candidate and separately frozen acceptance plan | `acceptance/summary.json` and raw engine evidence | Every configured executor passes the independent cases |
-| Delivery | Passing regression, acceptance, locked plans and source manifests | `final/<skill>/`, `final/evidence.json` (JSON), `final/changes.patch` (unified diff), `report.md` (Markdown) | The machine-readable verify gate reports `verified` |
-| Verification | Completed report and final evidence (plus the accepted child run for creation) | `verification.json` (JSON) | Hashes, frozen plans, all engines and final artifacts satisfy the completion gate |
+| Acceptance | Qualified candidate and separately frozen acceptance plan | `acceptance/target.json` (candidate path and hashes), `acceptance/summary.json`, immutable `acceptance/attempts/<attempt>/evaluation/summary.json` records and raw engine evidence | Every configured executor passes the independent cases against the delivered candidate |
+| Delivery | Passing regression, acceptance, locked plans and source manifests | `final/<skill>/`, `final/evidence.json` (JSON), `final/changes.patch` (unified diff) | Candidate matches the acceptance target and evidence |
+| Verification | Final evidence (plus the accepted child run for creation) | `verification.json` (JSON), final `report.md` (Markdown) | Hashes, frozen plans, all engines, stage contracts and final artifacts satisfy the completion gate |
 
 The creation pipeline invokes the same refinement stages for the first draft, so a
 new Skill receives the same executable planning, baseline, repair, regression and
@@ -72,5 +77,6 @@ large requirement/standard documents are recorded by source, size and hash rathe
 than copied wholesale into every repair request. The bounded source inventory
 prioritizes `SKILL.md`, cited findings and local Markdown references. If an omitted
 file is necessary, split the work into a smaller explicit stage or raise the budget
-only after checking the configured engine's context limits. Never expose held-out
-acceptance cases to repair.
+only after checking the configured engine's context limits. Omit acceptance cases
+from repair until a qualified candidate fails acceptance; then expose only the failed
+cases and their raw evidence, and rerun the complete suite after regression.

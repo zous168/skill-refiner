@@ -59,6 +59,11 @@ limit only after verifying that role's actual model context window.
 Codex supports `reasoning_effort`; native delegation additionally supports
 `child_model` via Codex's default-subagent-model setting. Model access and that
 setting depend on the installed CLI/account; verify the resulting child records.
+Codex profiles may set `codex_sandbox` to `read-only`, `workspace-write` or
+`danger-full-access`; executor profiles default to `workspace-write`, while planning
+calls always use `read-only`. Use `danger-full-access` only for a trusted local test
+that needs to bind a loopback fake service, and only when live-service credentials
+are absent from the environment.
 Profiles do not contain literal credentials. `api_key_env` names an existing
 environment variable. API URLs must not contain passwords, query strings or keys.
 Use absolute executable/script paths; role working directories are empty.
@@ -66,8 +71,8 @@ Use absolute executable/script paths; role working directories are empty.
 ## Actual execution paths
 
 - `codex`: real `codex exec --ephemeral --json`; execution evidence comes from
-  completed command events. Roles use read-only mode; target evaluations use
-  workspace-write in skill-up's temporary task workspace.
+  completed command events. Roles use read-only mode; target evaluations use the
+  configured `codex_sandbox` (workspace-write by default) in skill-up's temporary task workspace.
 - `cursor`: real Cursor Agent headless CLI with `--output-format stream-json`.
   Searches PATH and `~/.local/bin/cursor-agent`, or uses `executable`. Roles use
   ask mode; evaluation uses `--force` in the temporary task workspace. Requires
