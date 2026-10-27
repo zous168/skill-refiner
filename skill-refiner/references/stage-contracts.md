@@ -23,6 +23,44 @@ after a stage completes invalidates verification. Reused plans, drafts and their
 transcripts may be optional in the new run, but present evidence is still hashed and
 checked.
 
+For refinement runs, `run --resume-from RUN_DIRECTORY` reopens the same run directory.
+Before continuing, it checks the target and frozen-input manifests, controller/backend
+contract, every completed stage handoff, and cached result hashes. Completed agent
+responses and evaluations are keyed by their exact request or by the target manifest,
+frozen cases, executor settings and grader hashes. They are loaded without invoking
+the agent or evaluator again. The active incomplete operation uses a new attempt
+directory when its prior output is partial; engine `ERROR` results are retried. If a
+required checkpoint is damaged or its contract changed, resume stops and asks for a
+new run rather than trusting or overwriting that evidence. `--reuse-plan` remains a
+new-run path and must not be combined with `--resume-from`.
+
+Use `run --plan-only` for the visibility checkpoint before tests. It freezes and
+validates both plans, writes `work-plan.md`, then returns `status=planned` without
+executing baseline, regression or acceptance. Read the plan and continue the same
+workspace with `run --resume-from RUN_DIRECTORY`; plan calls are reused. Creation uses
+the same checkpoint through `create --plan-only` and resumes with `create --resume-run`.
+`work-plan.md` is the frozen, human-readable design and test checklist. Execution
+state belongs in `state.json`, `stages.json` and immutable stage evidence. The CLI
+emits structured JSON stage/evaluation events, including bounded heartbeats. When
+`large-task-tracking` owns the task, its parent snapshot/runtime is the sole user-visible
+progress record; it reads these internal files and events without copying long logs.
+Final verification remains bound to stage artifacts and hashes.
+
+Creation runs use `create --resume-run RUN_DIRECTORY` to continue the same workspace.
+The creation contract freezes business inputs, backends, controller code and case
+limits. Completed analysis and draft stages are validated and reused. If refinement
+was interrupted, its nested `refinement/` run resumes from its own checkpoint. A
+different contract or changed completed artifact is rejected; higher time, call,
+evaluation, planning or round budgets can be supplied when continuing.
+
+The human-readable `work-plan.md` presents the design/requirement map, acceptance
+criteria and frozen case checklist before execution. It has no live statuses and is
+written when the relevant plan is frozen. The parent task manager reports progress
+from structured events and internal checkpoints. One full regression run per repair
+round includes affected and previously passing development cases, so there is no extra
+focused pass before it.
+
+
 Controller calls use `skill-refiner.agent-request/v1` JSON with `role`, `instruction`,
 `input`, and `response_schema`. Each call directory also contains
 `request-manifest.json` (`skill-refiner.agent-request-manifest/v1`) with the request

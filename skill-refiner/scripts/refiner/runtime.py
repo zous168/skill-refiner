@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -337,8 +338,23 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
     raise RefinerError("Model exhausted max_turns without a final answer")
 
 
-def execute(profile, prompt, cwd, timeout, *, planning=False):
+def execute(profile, prompt, cwd, timeout, *, planning=False, progress_label=None):
     timeout = min(timeout, profile.get("timeout", timeout))
-    if profile["backend"] == "openai_compatible":
-        return run_api(profile, prompt, cwd, timeout, planning=planning)
-    return run_cli(profile, prompt, cwd, timeout, planning=planning)
+    started = time.monotonic()
+    stop = threading.Event()
+    def heartbeat():
+        while not stop.wait(30):
+            elapsed = round(time.monotonic() - started, 1)
+            print(json.dumps({"stage": "agent_call", "status": "still_running",
+                              "role": progress_label or "unknown", "elapsed_seconds": elapsed,
+                              "remaining_timeout_seconds": round(max(0, timeout - elapsed), 1)},
+                             ensure_ascii=False), flush=True)
+    watcher = threading.Thread(target=heartbeat, name="skill-refiner-progress", daemon=True)
+    watcher.start()
+    try:
+        if profile["backend"] == "openai_compatible":
+            return run_api(profile, prompt, cwd, timeout, planning=planning)
+        return run_cli(profile, prompt, cwd, timeout, planning=planning)
+    finally:
+        stop.set()
+        watcher.join(timeout=1)

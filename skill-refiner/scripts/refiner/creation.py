@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import difflib
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ from .profiles import load_config
 from .schemas import PLAN, REVIEW
 from .standards import AUTHORING, discover_project_standards, lint
 from .stages import StageManifest, CREATE_EVENTS
+from .plan import write_work_plan
 
 STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
@@ -186,7 +188,11 @@ def analysis_markdown(analysis):
 
 def run(args):
     resume = Path(args.resume_from).resolve() if getattr(args,'resume_from',None) else None
-    if not (args.description or args.spec or resume):
+    resume_run = Path(args.resume_run).resolve() if getattr(args, 'resume_run', None) else None
+    resume_was_verified = False
+    if resume and resume_run:
+        raise RefinerError("Use either --resume-from or --resume-run, not both")
+    if not (args.description or args.spec or resume or resume_run):
         raise RefinerError("create needs a business description or --spec")
     if args.name and not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", args.name):
         raise RefinerError("--name must be kebab-case")
@@ -199,27 +205,114 @@ def run(args):
         raise RefinerError("Select a controller backend with --config or --agent-command")
     if not config and not args.engine_config and args.engine is None:
         raise RefinerError("Select an evaluation backend with --config, --engine-config or --engine")
-    standard_target = getattr(args, "destination", None) or getattr(args, "output", None)
-    standard_paths = discover_project_standards(standard_target, getattr(args, "standard", ()), Path.cwd())
-    for reference in args.spec + standard_paths:
-        if not Path(reference).is_file():
-            raise RefinerError("Reference file does not exist: " + reference)
-    work = Path(args.output).resolve() if args.output else Path.cwd() / '.refiner-runs' / (
-        'create-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
-    if work.exists():
-        raise RefinerError("Creation output must be a new directory")
-    destination = Path(args.destination).resolve() if args.destination else None
-    if destination and (destination.exists() or destination.is_relative_to(work) or work.is_relative_to(destination)):
-        raise RefinerError("Destination must be new and outside the creation workspace")
-    work.mkdir(parents=True)
+    if resume_run:
+        work = resume_run
+        if not work.is_dir() or not (work / "state.json").is_file():
+            raise RefinerError("--resume-run must name an existing creation workspace")
+        if args.output and Path(args.output).resolve() != work:
+            raise RefinerError("--output must match --resume-run when continuing a creation workspace")
+        standard_paths = []
+        destination = None
+        inputs = read_json(work / "inputs.json")
+        previous_contract = read_json(work / "creation-resume-contract.json")
+        previous_state = read_json(work / "state.json")
+        resume_was_verified = (previous_state.get("status") == "created"
+                               and previous_state.get("verification_status") == "verified")
+        if args.description is not None and args.description != inputs.get("business_description"):
+            raise RefinerError("Resume business description differs from the frozen creation inputs")
+        if args.name and args.name != inputs.get("requested_name"):
+            raise RefinerError("Resume name differs from the frozen creation inputs")
+        if args.spec:
+            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec]
+            if supplied != inputs.get("requirements"):
+                raise RefinerError("Resume requirements differ from the frozen creation inputs")
+        if args.standard:
+            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.standard]
+            frozen_standards = {row.get("source"): row.get("content")
+                                for row in inputs.get("standards", [])[1:] if isinstance(row, dict)}
+            if any(frozen_standards.get(row["source"]) != row["content"] for row in supplied):
+                raise RefinerError("Resume standards differ from the frozen creation inputs")
+        saved_destination = previous_contract.get("destination")
+        if args.destination and str(Path(args.destination).resolve()) != saved_destination:
+            raise RefinerError("Resume destination differs from the frozen creation contract")
+        destination = Path(saved_destination).resolve() if saved_destination else None
+    else:
+        standard_target = getattr(args, "destination", None) or getattr(args, "output", None)
+        standard_paths = discover_project_standards(standard_target, getattr(args, "standard", ()), Path.cwd())
+        for reference in args.spec + standard_paths:
+            if not Path(reference).is_file():
+                raise RefinerError("Reference file does not exist: " + reference)
+        work = Path(args.output).resolve() if args.output else Path.cwd() / '.refiner-runs' / (
+            'create-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+        if work.exists():
+            raise RefinerError("Creation output must be a new directory")
+        destination = Path(args.destination).resolve() if args.destination else None
+        if destination and (destination.exists() or destination.is_relative_to(work) or work.is_relative_to(destination)):
+            raise RefinerError("Destination must be new and outside the creation workspace")
+        work.mkdir(parents=True)
     started = time.monotonic()
-    deadline = started + args.max_seconds
-    state = {"status": "analyzing", "mode": "create", "workspace": str(work), "questions": []}
+    elapsed_before = float(previous_state.get("elapsed_seconds", 0.0)) if resume_run else 0.0
+    deadline = started + max(0.0, args.max_seconds - elapsed_before)
+    if resume_run:
+        state = copy.deepcopy(previous_state)
+        state.setdefault("resume_history", []).append({"previous_status": previous_state.get("status"),
+                                                        "elapsed_seconds": elapsed_before})
+        state.update(status="resuming", elapsed_seconds=elapsed_before)
+        for key in ("error", "verification_status", "verification_error"):
+            state.pop(key, None)
+    else:
+        state = {"status": "analyzing", "mode": "create", "workspace": str(work), "questions": []}
     agent = Agent(work, args.agent_command, args.timeout, config=config)
     agent.max_calls, agent.deadline = args.max_agent_calls, deadline
-    inputs = {"business_description": args.description or "", "requested_name": args.name,
-              "requirements": [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec],
-              "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in standard_paths]}
+    if not resume_run:
+        inputs = {"business_description": args.description or "", "requested_name": args.name,
+                  "requirements": [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec],
+                  "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in standard_paths]}
+    engine_config = read_json(args.engine_config) if args.engine_config else None
+    execution = {"backend_config": config, "agent_command": args.agent_command, "engine": args.engine,
+                 "engine_config": engine_config, "skill_up": args.skill_up, "timeout": args.timeout,
+                 "parallelism": args.parallelism}
+    options = {"max_rounds": args.max_rounds, "planning_attempts": args.planning_attempts,
+               "max_cases": args.max_cases, "acceptance_cases": args.acceptance_cases}
+    limits = {"max_seconds": args.max_seconds, "max_agent_calls": args.max_agent_calls,
+              "max_evaluations": args.max_evaluations, "max_rounds": args.max_rounds,
+              "planning_attempts": args.planning_attempts, "max_cases": args.max_cases,
+              "acceptance_cases": args.acceptance_cases}
+    state["limits"] = limits
+    state.setdefault("evaluation_history", [])
+    controller_root = Path(__file__).resolve().parent.parent
+    controller_sha256 = digest({path.relative_to(controller_root).as_posix():
+        hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(controller_root.rglob("*.py")) if "__pycache__" not in path.parts})
+    if resume_run:
+        if (previous_contract.get("schema_version") != "skill-refiner.creation-resume/v1"
+                or previous_contract.get("controller_sha256") != controller_sha256):
+            raise RefinerError("Creation controller or resume contract changed; start a new creation")
+        if previous_contract.get("inputs_sha256") != digest(inputs):
+            raise RefinerError("Frozen creation inputs changed; start a new creation")
+        if previous_contract.get("execution_sha256") != digest(execution):
+            raise RefinerError("Resume backend or execution settings differ from the original creation")
+        prior_options = previous_contract.get("options", {})
+        if (options["max_cases"] != prior_options.get("max_cases")
+                or options["acceptance_cases"] != prior_options.get("acceptance_cases")
+                or options["planning_attempts"] < prior_options.get("planning_attempts", 1)
+                or options["max_rounds"] < prior_options.get("max_rounds", 1)):
+            raise RefinerError("Resume may increase planning/round budgets, but must keep frozen case limits")
+        prior_limits = previous_contract.get("limits", {})
+        if any(limits[name] < prior_limits.get(name, 1) for name in limits):
+            raise RefinerError("Resume budgets cannot be lower than the original creation")
+        if resume_was_verified:
+            from .gate import verify_run
+            verify_run(work)
+            return previous_state
+        previous_contract["options"], previous_contract["limits"] = options, limits
+        write_json(work / "creation-resume-contract.json", previous_contract)
+    else:
+        previous_contract = {"schema_version": "skill-refiner.creation-resume/v1",
+                             "inputs_sha256": digest(inputs), "execution_sha256": digest(execution),
+                             "controller_sha256": controller_sha256, "destination": str(destination) if destination else None,
+                             "options": options, "limits": limits}
+        write_json(work / "creation-resume-contract.json", previous_contract)
     resumed_analysis, resumed_draft, resumed_suite = None, None, None
     if resume:
         previous_inputs = read_json(resume/'inputs.json')
@@ -245,49 +338,102 @@ def run(args):
         review_path = resume / 'analysis-review.json'
         if review_path.is_file():
             shutil.copy2(review_path, work / 'analysis-review.json')
-    write_json(work / "inputs.json", inputs)
-    (work / 'inputs').mkdir()
+    if not resume_run:
+        previous_contract["inputs_sha256"] = digest(inputs)
+        write_json(work / "creation-resume-contract.json", previous_contract)
+    resume_analysis_complete = False
+    resume_analysis_lock = None
+    if resume_run and (work / "analysis.json").is_file() and (work / "business.lock.json").is_file():
+        import jsonschema
+        try:
+            resumed_analysis = read_json(work / "analysis.json")
+            saved_business_lock = read_json(work / "business.lock.json")
+            saved_review = read_json(work / "analysis-review.json")
+            validate_analysis(resumed_analysis, inputs["requested_name"])
+            validate_analysis_review(saved_review, resumed_analysis)
+            resume_analysis_complete = (
+                not resumed_analysis["blocking_questions"] and saved_review["approved"] is True
+                and saved_business_lock.get("input_sha256") == digest(inputs)
+                and saved_business_lock.get("sha256") == digest({"inputs": inputs, "analysis": resumed_analysis}))
+            if resume_analysis_complete:
+                resume_analysis_lock = saved_business_lock["sha256"]
+        except (OSError, ValueError, KeyError, TypeError, jsonschema.ValidationError, jsonschema.SchemaError):
+            resumed_analysis = None
+            resume_analysis_complete = False
+    if resume_run and resume_analysis_complete and (work / "draft-manifest.json").is_file():
+        expected_draft_manifest = read_json(work / "draft-manifest.json")
+        draft_candidates = []
+        if previous_state.get("draft_root"):
+            draft_candidates.append(Path(previous_state["draft_root"]).resolve())
+        draft_candidates.extend(sorted((work / "drafts").glob("*/" + resumed_analysis["name"]), reverse=True)
+                                if (work / "drafts").is_dir() else [])
+        for candidate_draft in draft_candidates:
+            if (candidate_draft.is_relative_to(work) and candidate_draft.is_dir()
+                    and manifest(candidate_draft) == expected_draft_manifest
+                    and not any(f["severity"] == "error" for f in lint(candidate_draft, resumed_analysis["name"]))):
+                resumed_draft = candidate_draft
+                break
+    has_stage_manifest = resume_run and (work / "stages.json").is_file()
+    stages = StageManifest(work, "create", resume=bool(has_stage_manifest))
+    print(json.dumps({"status": "started", "workspace": str(work),
+                      "work_plan": str(work / "work-plan.md"),
+                      "state_file": str(work / "state.json"),
+                       "stage_manifest": str(work / "stages.json"), "limits": limits,
+                      "max_rounds": args.max_rounds}, ensure_ascii=False), flush=True)
+    materialize_inputs = not stages.is_completed("inputs")
+    if materialize_inputs:
+        write_json(work / "inputs.json", inputs)
+        (work / 'inputs').mkdir(exist_ok=True)
     request_file = work / 'inputs/business-request.md'
-    request_file.write_text(inputs['business_description'] + '\n', encoding='utf-8')
+    if materialize_inputs:
+        request_file.write_text(inputs['business_description'] + '\n', encoding='utf-8')
     spec_paths = []
     for index, requirement in enumerate(inputs['requirements']):
         path = work / 'inputs' / f'requirement-{index+1}.md'
-        path.write_text(requirement['content'], encoding='utf-8')
+        if materialize_inputs:
+            path.write_text(requirement['content'], encoding='utf-8')
         spec_paths.append(str(path))
     standard_paths = []
     for index, standard in enumerate(inputs['standards'][1:]):
         path = work / 'inputs' / f'standard-{index+1}.md'
-        path.write_text(standard['content'], encoding='utf-8')
+        if materialize_inputs:
+            path.write_text(standard['content'], encoding='utf-8')
         standard_paths.append(str(path))
-    stages = StageManifest(work, "create")
-    stages.complete("inputs")
+    if materialize_inputs:
+        stages.complete("inputs")
     input_hash = digest(inputs)
     business_sources = ([{'id': 'business_description', 'content': inputs['business_description']}] if inputs['business_description'] else []) + [
         {'id': f'spec-{index+1}', 'source': row['source'], 'content': row['content']}
         for index, row in enumerate(inputs['requirements'])]
     refinement = None
     analysis = resumed_analysis
-    locked = None
+    locked = resume_analysis_lock
 
     def event(status, **extra):
         if status in CREATE_EVENTS:
-            stages.activate(CREATE_EVENTS[status])
-        state.update(status=status, **extra)
+            stage_id = CREATE_EVENTS[status]
+            if not (resume_run and stages.is_completed(stage_id)):
+                stages.activate(stage_id)
+        state.update(status=status, elapsed_seconds=round(elapsed_before + time.monotonic() - started, 2),
+                     creation_agent_calls=agent.calls, agent_calls=agent.calls + (refinement or {}).get("agent_calls", 0),
+                     cached_agent_calls=agent.cached_calls,
+                     target_evaluations=(refinement or {}).get("target_evaluations", 0), **extra)
         write_json(work / 'state.json', state)
-        print(json.dumps({'status': status, **extra}, ensure_ascii=False), flush=True)
+        print(json.dumps({'status': status, 'elapsed_seconds': state['elapsed_seconds'],
+                          'max_seconds': args.max_seconds, **extra}, ensure_ascii=False), flush=True)
 
     def integrity():
         if digest(read_json(work / 'inputs.json')) != input_hash or request_file.read_text() != inputs['business_description'] + '\n':
             raise RefinerError('Frozen business inputs changed')
         if locked and digest({'inputs': inputs, 'analysis': read_json(work / 'analysis.json')}) != locked:
             raise RefinerError('Frozen business contract changed')
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline or elapsed_before + time.monotonic() - started > args.max_seconds:
             raise RefinerError('Creation wall-clock budget exhausted')
 
-    event('resuming' if resume else 'analyzing')
+    event('resuming' if resume or resume_run else 'analyzing')
     try:
         feedback = []
-        for attempt in range(0 if resume else 2):
+        for attempt in range(0 if resume or resume_analysis_complete else 2):
             analysis = agent.ask('analyze',
                 'Analyze the supplied business request into a scoped executable Agent Skill. Choose a concise kebab-case name '
                 'unless requested_name is supplied. Extract all business requirements with stable IDs and concrete source '
@@ -333,15 +479,21 @@ def run(args):
             break
         write_json(work / 'analysis.json', analysis)
         (work / 'business-analysis.md').write_text(analysis_markdown(analysis))
+        write_work_plan(work, analysis=analysis, limits=limits)
         locked = digest({'inputs': inputs, 'analysis': analysis})
         write_json(work / 'business.lock.json', {'sha256': locked, 'input_sha256': input_hash})
         integrity()
         event('reusing_draft' if resumed_draft else 'creating', skill_name=analysis['name'])
         feedback = []
         previous_draft = None
-        if resumed_draft:
+        if resume_run and resumed_draft:
+            draft_root = resumed_draft
+        elif resumed_draft:
             draft_root = work/'drafts/reused'/analysis['name']
             snapshot(resumed_draft,draft_root)
+        draft_numbers = [int(path.name) for path in (work / "drafts").iterdir()
+                         if path.is_dir() and path.name.isdigit()] if (work / "drafts").is_dir() else []
+        draft_offset = max(draft_numbers, default=0)
         for attempt in range(0 if resumed_draft else 2):
             draft = agent.ask('draft',
                 DRAFT_INSTRUCTION,
@@ -349,7 +501,7 @@ def run(args):
                  **({'previous_draft': previous_draft} if previous_draft else {})}, DRAFT)
             previous_draft = draft
             draft, mapping = normalize_draft(draft, analysis['name'])
-            draft_root = work / 'drafts' / str(attempt+1) / analysis['name']
+            draft_root = work / 'drafts' / str(draft_offset + attempt + 1) / analysis['name']
             draft_root.mkdir(parents=True)
             write_json(draft_root.parent / 'path-mapping.json', mapping)
             try:
@@ -375,10 +527,26 @@ def run(args):
             raise RefinerError('No role-call budget left for tests and refinement')
         child = copy.copy(args)
         child.target, child.output, child.reuse_plan = str(draft_root), str(work / 'refinement'), None
+        child.resume_from = None
         # Use the saved original requirements, not an implementation-derived spec.
         child.spec = ([str(request_file)] if inputs['business_description'] else []) + spec_paths
         child.standard = standard_paths
-        child.max_seconds, child.max_agent_calls = max(1, int(deadline - time.monotonic())), remaining
+        outer_remaining = max(1, int(deadline - time.monotonic()))
+        child.max_seconds, child.max_agent_calls = outer_remaining, remaining
+        child.plan_only = bool(getattr(args, 'plan_only', False))
+        if resume_run and Path(child.output).is_dir():
+            child_contract_path = Path(child.output) / "resume-contract.json"
+            if child_contract_path.is_file():
+                child_state = read_json(Path(child.output) / "state.json")
+                child.resume_from = child.output
+                child.max_seconds = max(1, int(float(child_state.get("elapsed_seconds", 0.0)) + outer_remaining))
+            else:
+                attempts = Path(child.output).parent / "refinement-resume-attempts"
+                attempts.mkdir(exist_ok=True)
+                prior_attempts = [int(path.name.split("-", 1)[1]) for path in attempts.glob("attempt-*")
+                                  if path.is_dir() and path.name.split("-", 1)[1].isdigit()]
+                archived = attempts / f"attempt-{max(prior_attempts, default=0)+1:03}"
+                shutil.move(child.output, archived)
         child.creation_context = {'contract': analysis['requirements'], 'business_analysis': analysis,
                                   'execution_helpers': PYTHON_OBSERVER_GUIDE,
                                   'required_case_kinds': [s['kind'] for s in analysis['scenarios'] if s['applicable']]}
@@ -395,11 +563,40 @@ def run(args):
         if manifest(draft_root) != initial_manifest:
             raise RefinerError('Original generated draft changed during refinement')
         state['refinement_status'] = refinement['status']
+        state['evaluation_history'] = refinement.get('evaluation_history', state.get('evaluation_history', []))
+        state['refinement_rounds'] = refinement.get('rounds', [])
+        state['target_evaluations'] = refinement.get('target_evaluations', 0)
+        write_work_plan(work, source=draft_root, analysis=analysis, limits=limits)
+        if refinement['status'] == 'planned':
+            state['refinement_workspace'] = str(child.output)
+            state['plan_ready'] = True
+            event('plan_ready', refinement_workspace=str(child.output),
+                  work_plan=str(Path(child.output) / 'work-plan.md'),
+                  development_cases=refinement.get('planned_development_cases'),
+                  acceptance_cases=refinement.get('planned_acceptance_cases'),
+                  max_rounds=args.max_rounds, max_seconds=args.max_seconds,
+                  max_evaluations=args.max_evaluations)
+            state.update(status='planned', planned_only=True,
+                         elapsed_seconds=round(elapsed_before + time.monotonic() - started, 2))
+            write_json(work / 'state.json', state)
+            return state
         if refinement['status'] not in {'passed', 'unchanged'}:
             event(refinement['status'], error=refinement.get('error'), questions=refinement.get('gaps', []))
             return state
         final = work / 'final' / analysis['name']
-        snapshot(refinement['final_skill'], final)
+        refinement_final = Path(refinement['final_skill'])
+        if final.is_dir() and manifest(final) == manifest(refinement_final):
+            pass
+        else:
+            if final.exists():
+                attempts = work / 'final' / 'resume-attempts'
+                attempts.mkdir(parents=True, exist_ok=True)
+                prior_attempts = [int(path.name.split('-', 1)[1]) for path in attempts.glob('attempt-*')
+                                  if path.is_dir() and path.name.split('-', 1)[1].isdigit()]
+                archived = attempts / f"attempt-{max(prior_attempts, default=0)+1:03}"
+                archived.mkdir()
+                shutil.move(str(final), str(archived / final.name))
+            snapshot(refinement_final, final)
         # The repair diff may be empty when the first implementation already passes.
         (work / 'final/changes.patch').write_text((work / 'refinement/final/changes.patch').read_text())
         full_patch = []
@@ -423,10 +620,12 @@ def run(args):
             (work / 'business-analysis.md').write_text(analysis_markdown(analysis))
         state.update(agent_calls=agent.calls + (refinement or {}).get('agent_calls', 0),
                      creation_agent_calls=agent.calls, target_evaluations=(refinement or {}).get('target_evaluations', 0),
-                     elapsed_seconds=round(time.monotonic() - started, 2))
+                     cached_agent_calls=agent.cached_calls,
+                     elapsed_seconds=round(elapsed_before + time.monotonic() - started, 2))
         write_json(work / 'state.json', state)
         lines = ['# Business Skill creation', '', 'Status: **' + state['status'] + '**', '',
                  'Business analysis: [business-analysis.md](business-analysis.md)',
+                 'Design and tests: [work-plan.md](work-plan.md)',
                  'Refinement results: [refinement/report.md](refinement/report.md)', '',
                  'Role calls: ' + str(state['agent_calls']), 'Evaluations: ' + str(state['target_evaluations']), '',
                  'First drafts and original business inputs are preserved. Failed or incomplete runs are not delivered as final Skills.']
@@ -457,7 +656,11 @@ def run(args):
                 write_json(work / 'verification.json', verification)
                 state['verification_status'] = verification['status']
                 if destination:
-                    snapshot(state['final_skill'], destination)
+                    if destination.exists():
+                        if not destination.is_dir() or manifest(destination) != manifest(state['final_skill']):
+                            raise RefinerError('Saved destination already exists with different contents')
+                    else:
+                        snapshot(state['final_skill'], destination)
                     state['destination'] = str(destination)
             except Exception as exc:
                 state.update(status='verification_failed', verification_error=str(exc))

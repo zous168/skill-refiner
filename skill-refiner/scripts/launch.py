@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -41,19 +42,20 @@ def main():
             if flag not in supplied:
                 args += [flag, str(value)]
     if command == "bootstrap" and "--directory" not in supplied:
-        args += ["--directory", str(skill_up.parent)]
+        args += ["--directory", str(skill / ".runtime" / "bin")]
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # User profiles contain explicit CLI paths. Also support the legacy doctor's
     # PATH lookup without requiring shell initialization or changing global PATH.
     env["PATH"] = os.pathsep.join([*runtime.get("path_entries", []), str(skill_up.parent),
                                   env.get("PATH", "")])
-    os.execve(str(python), [str(python), str(skill / "scripts" / "refine.py"), *args], env)
+    command = [str(python), str(skill / "scripts" / "refine.py"), *args]
+    return subprocess.run(command, env=env, check=False).returncode
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print("skill-refiner launcher: " + str(exc), file=sys.stderr)
         raise SystemExit(2)

@@ -88,6 +88,11 @@ Map every required behavior to at least one executable check. Plan concrete norm
 boundary, and error cases where applicable, including configuration and help-request
 paths when they affect behavior. Define observable inputs, expected outputs, and
 independent checks. Keep the source requirements and test plan frozen before repair.
+Before running the target, render and show a concise work plan with the design outline,
+stable requirement IDs, acceptance criteria, case IDs/types, what each case checks,
+and the total time/round/evaluation limits. Save the complete plan and checklist in the
+run workspace. Show progress as the phase and case results change; do not leave users
+to infer status from a long-running process.
 Do not show acceptance cases to the implementation author before the candidate passes
 development; if the candidate fails final acceptance, expose only failed cases and
 their evidence to repair, then rerun the complete frozen acceptance suite.
@@ -108,16 +113,20 @@ it. Split oversized work along requirement or component boundaries while preserv
 the original frozen test contract and keeping acceptance inputs out of pre-acceptance
 repair. After a failed acceptance run, only its failed cases become repair evidence.
 
-After each repair, rerun affected cases, the full suite, and previously passing cases.
-Then run fresh independent acceptance and compare engines on the same case set. If
-acceptance fails, route its failing cases into another evidence-bound repair and repeat
-development regression and the complete acceptance suite. An
-unavailable engine or failed execution is an error, not a pass. Stop when the bounded
-budget is exhausted, preserve evidence, and report exactly what remains unverified.
+After each repair, run one complete regression suite; it includes affected and
+previously passing cases, so do not immediately repeat those cases in a separate
+focused suite. Then run fresh independent acceptance and compare engines on the same
+case set. If acceptance fails, route its failing cases into another evidence-bound
+repair and repeat regression and the complete acceptance suite. An unavailable engine
+or failed execution is an error, not a pass. Enforce the configured hard caps on rounds,
+wall-clock time, calls, evaluations and cases. Never extend a budget or start another
+test pass automatically after it is exhausted. Preserve evidence and report exactly
+what remains unverified.
 
 ## 7. Deliver with evidence
 
 Report the Skill location, behavior changed, test and engine results, relevant
-configuration, limitations, and any remaining user decision. Keep the original,
-candidate, diff, plans, raw run evidence, and final gate result available for review.
+configuration, consumed limits, limitations, and any remaining user decision. Keep
+the original, candidate, diff, visible work plan, live progress, raw run evidence, and
+final gate result available for review.
 Only claim completion when the required verification gate passes.

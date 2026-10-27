@@ -54,10 +54,67 @@ When `references/local-runtime.json` exists, invoke this Skill's absolute
 python3 /absolute/path/to/skill-refiner/scripts/launch.py doctor
 python3 /absolute/path/to/skill-refiner/scripts/launch.py create \
   --spec /absolute/path/to/task/inputs/requirements.md \
-  --output /absolute/path/to/task/run
+  --output /absolute/path/to/task/run --plan-only
+python3 /absolute/path/to/skill-refiner/scripts/launch.py create \
+  --resume-run /absolute/path/to/task/run
 python3 /absolute/path/to/skill-refiner/scripts/launch.py run /absolute/path/to/target-skill \
   --spec /absolute/path/to/task/inputs/requirements.md \
-  --output /absolute/path/to/task/run
+  --output /absolute/path/to/task/run --plan-only
+python3 /absolute/path/to/skill-refiner/scripts/launch.py run /absolute/path/to/target-skill \
+  --resume-from /absolute/path/to/task/run
+```
+
+Before any target execution, first prepare the reviewed plan without running tests:
+
+```sh
+python3 /absolute/path/to/skill-refiner/scripts/launch.py run /absolute/path/to/target-skill \
+  --spec /absolute/path/to/task/inputs/requirements.md \
+  --output /absolute/path/to/task/run --plan-only
+```
+
+Read `work-plan.md` from the emitted workspace path. Show the design outline,
+requirement IDs, acceptance criteria, frozen per-case checklist and explicit limits
+before execution. Continue the same workspace with `run TARGET --resume-from RUN
+--config FILE` after presenting the plan; wait only when it reveals a material
+business question. `--plan-only` exits with `status=planned`, which is not a passing
+run. The plan is a frozen design artifact; it does not track execution status.
+
+For long or cross-turn workflows, use installed GoalExecutor `large-task-tracking` (workspace source folder `large-task-skill`) as the task owner. It owns
+user-visible progress and the cross-turn snapshot. This skill writes internal
+`state.json`, `stages.json`, stage evidence and structured JSON events for the parent
+to consume; it does not create `progress.md` or `progress.json`.
+
+To continue an interrupted refinement in place, pass the existing run directory to
+`--resume-from` and repeat the same target and backend settings. Do not pass a new
+`--output`; the run directory contains the frozen inputs, completed evidence and
+resume cache. The controller validates these artifacts, reuses completed agent calls
+and evaluations, and retries only incomplete or errored work. Changed target files,
+frozen inputs, controller code or backend settings require a new run. Budgets can be
+kept or increased, but not reduced.
+
+```sh
+python3 /absolute/path/to/skill-refiner/scripts/launch.py run /absolute/path/to/target-skill \
+  --resume-from /absolute/path/to/task/run \
+  --config /absolute/path/to/backends.json
+```
+
+When `large-task-tracking` owns the cross-turn goal, it owns top-level status, milestones,
+user updates and the persistent snapshot. Put the refiner workspace and its
+`state.json`/`stages.json` paths in the parent runtime or a referenced artifact record;
+keep only a short artifact reference in the snapshot. `skill-refiner` remains
+authoritative for internal stages, frozen plans, evidence and acceptance gates. Resume
+the same run with `--resume-from` instead of creating a replacement run.
+
+To continue an interrupted business-Skill creation, resume its existing creation
+workspace with `create --resume-run`. Completed analysis and draft artifacts are
+validated and reused; an in-progress refinement child is continued from its own
+`refinement/` checkpoint. The original backend, inputs, controller and case limits
+must still match; budgets may stay the same or increase.
+
+```sh
+python3 /absolute/path/to/skill-refiner/scripts/launch.py create \
+  --resume-run /absolute/path/to/task/run \
+  --config /absolute/path/to/backends.json
 ```
 
 The installed launcher selects the provisioned Python, pinned skill-up and saved
@@ -70,20 +127,35 @@ installation defaults. Do not silently remove unavailable engines or claim an
 endpoint was verified without running it.
 
 Execute and monitor the complete bounded pipeline; do not stop at returning shell
-commands or a test plan when the user asked to run it. After it exits, invoke the
-`verify` command on that run directory. Only a successful machine-readable
+commands or a test plan when the user asked to run it. For a new run, use `--plan-only`
+first, present the frozen work plan and explicit budgets, then resume that same run
+without waiting for approval unless a material decision is unresolved. During
+execution, emit structured stage and evaluation events and persist resumable details
+in `state.json` and `stages.json`. When `large-task-tracking` owns the workflow, run this CLI in a monitorable session
+when the host supports it. Relay meaningful stage changes and evaluation heartbeats
+from structured events and `state.json` through its snapshot/runtime; do not maintain a
+second progress dashboard here.
+
+Do not describe a test suite as unbounded: defaults are two repair rounds, 20 minutes
+for refinement or 30 minutes for creation, and 40/80 case-executor evaluations
+respectively. Hard limits are three repair rounds, 60 minutes, 128 agent calls, 200
+case-executor evaluations, four plan attempts, and 30 cases in either suite. These
+budgets cover the full run; creation does not reset them for nested refinement. Stop
+when any budget is exhausted, save the current stage and evidence, and report the
+precise remaining checklist to the task owner.
+
+After it exits, invoke the `verify` command on that run directory. Only a successful machine-readable
 `status=verified` permits you to describe the candidate as complete. A failed or
 missing gate means the run is incomplete, even if a draft looks usable. Report the
 stop reason and evidence paths. Adoption into the original is a separate action
 unless already requested.
 For a source checkout without the installed runtime, follow the setup below.
 
-To continue a failed/interrupted creation with an approved business contract and
-validated first draft, use `create --resume-from PREVIOUS_CREATION --output NEW_RUN`.
-It validates hashes and reuses approved artifacts and frozen plans when available,
-then reruns baseline, repairs, regression and acceptance; it never reuses verdicts.
-Changed business inputs require a new creation. This is a new invocation; preserve
-any overall budget the user explicitly supplied and report the provenance.
+To start a separate creation from an approved business contract and validated first
+draft, use `create --resume-from PREVIOUS_CREATION --output NEW_RUN`. This path starts
+a new run and does not reuse prior verdicts. For an interrupted run, use
+`create --resume-run` on that run's existing workspace instead. Changed business
+inputs require a new creation.
 
 For new Skills, independently review and freeze the business contract before
 implementation. Require executable cases for every applicable normal/boundary/error
@@ -104,15 +176,18 @@ preserved; only `created` means creation passed all gates. Use
    context; ask only for ambiguity that materially changes the expected behavior.
 2. Use the project virtual environment when available. The script needs Python
    3.10+, PyYAML and jsonschema. If skill-up is absent,
-   `scripts/refine.py bootstrap` installs the checksum-verified pinned release
-   locally. Do not replace the user's global agent installation.
-3. Invoke the full pipeline, using absolute paths for the target and reference files:
+   `scripts/refine.py bootstrap` uses the bundled, hash-verified skill-up 0.13.0 on
+   Windows x64 without network; other supported platforms fetch the pinned release
+   and verify its archive checksum before installing. Do not replace the user's global agent installation.
+3. Prepare and show the frozen work plan first, using absolute paths for the target
+   and reference files. Then resume the same workspace to run the pipeline:
 
    ```sh
    python scripts/refine.py run /path/to/target-skill \
      --spec /path/to/business-requirements.md \
-     --standard /path/to/authoring-standard.md \
-     --config /path/to/backends.json
+     --standard /path/to/authoring-standard.md --output /path/to/run --plan-only
+   python scripts/refine.py run /path/to/target-skill \
+     --resume-from /path/to/run --config /path/to/backends.json
    ```
 
    `--spec` and additional `--standard` options are optional and repeatable. Project
@@ -126,9 +201,12 @@ preserved; only `created` means creation passed all gates. Use
    actual pipeline. A bare `doctor` checks shared prerequisites only; it does not
    select or authenticate a model provider. Report unverified backends separately
    from observed passes.
-4. Follow emitted stages and inspect `state.json`, `report.md` and upstream logs.
-   A failed or skipped execution is not a pass. Do not manually weaken generated
-   cases or rewrite state to make the run appear successful.
+4. Follow emitted stages and inspect `work-plan.md`, `state.json`, `stages.json`,
+    `report.md` and upstream logs. The first is the frozen design/test plan; the next
+    two are internal resume and evidence records. Long test processes emit structured
+    heartbeats with elapsed time, remaining timeout, executor and evaluation count;
+    the large-task owner uses them for user-visible progress.
+
 5. Verify the completed run with the same installed launcher:
 
    ```sh
@@ -157,8 +235,10 @@ preserved; only `created` means creation passed all gates. Use
   repairs. Each repair must cite a failed case or material standards finding.
 - Modify scripts when scripts cause failure. Do not compensate for a defect by
   manually calculating the answer, hardcoding known inputs or deleting a capability.
-- Run affected cases, the full generated suite and existing native skill-up tests.
-  Reject candidates that regress baseline successes or previously repaired cases.
+- Run one full generated development suite per repair, including affected and
+  previously passing cases, plus supported existing native skill-up tests. Do not
+  repeat a focused subset immediately before the full suite. Reject candidates that
+  regress baseline successes or previously repaired cases.
   In a matrix, retain passing behavior per engine and case. Every configured
   executor must pass regression and acceptance; an unavailable engine is ERROR.
 - Retain demonstrated partial improvements for the next round. A repairer's

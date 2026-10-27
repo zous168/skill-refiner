@@ -7,7 +7,7 @@ import fnmatch
 import mimetypes
 from pathlib import Path
 
-from .common import write_json
+from .common import read_json, write_json
 
 
 def _a(path, media_type=None, glob=False, required=True):
@@ -36,7 +36,8 @@ CONTRACTS = {
          "validation_gate": {"id": "reviewed-frozen-plans", "implementation": "validate_plan; validate_plan_review; oracle lock"},
          "failure_states": ["coverage_gap", "error"]},
         {"id": "baseline", "inputs": [_a("test-plan.json"), _a("original/**", glob=True)],
-         "outputs": [_a("baseline/summary.json"), _a("baseline/standards.json"), *_calls("standards-review")],
+         "outputs": [_a("baseline/summary.json"), _a("baseline/standards.json"),
+                     _a("baseline/resume-cache.json", required=False), *_calls("standards-review")],
          "validation_gate": {"id": "baseline-observed", "implementation": "evaluate; standards_review; reject execution ERROR"},
          "failure_states": ["execution_error", "error"]},
         {"id": "repair", "inputs": [_a("baseline/summary.json"), _a("test-plan.json"),
@@ -48,11 +49,13 @@ CONTRACTS = {
          "failure_states": ["no_progress", "error"]},
         {"id": "regression", "inputs": [_a("iterations/round-*/changes.json", glob=True), _a("test-plan.json")],
          "outputs": [_a("iterations/round-*/regression/summary.json", glob=True),
+                     _a("iterations/round-*/regression/resume-cache.json", glob=True, required=False),
                      _a("iterations/round-*/standards.json", glob=True), *_calls("standards-review")],
          "validation_gate": {"id": "same-suite-no-regressions", "implementation": "compare_candidate; qualifies"},
          "failure_states": ["no_progress", "not_converged", "error"]},
         {"id": "acceptance", "inputs": [_a("acceptance-plan.json"), _a("acceptance/target.json")],
-         "outputs": [_a("acceptance/summary.json"), _a("acceptance/attempts/**", glob=True, required=False)],
+         "outputs": [_a("acceptance/summary.json"), _a("acceptance/attempts/**", glob=True, required=False),
+                     _a("acceptance/attempts/**/evaluation/resume-cache.json", glob=True, required=False)],
          "validation_gate": {"id": "fresh-independent-acceptance", "implementation": "evaluate; failures return to evidence-bound repair and regression"},
          "failure_states": ["failed_acceptance", "execution_error", "error"]},
         {"id": "delivery", "inputs": [_a("final/evidence.json"), _a("oracle.lock.json")],
@@ -102,10 +105,27 @@ def _now():
 def collect_artifacts(root, declarations):
     root = Path(root).resolve()
     results, missing = [], []
+    files = sorted((path for path in root.rglob("*") if path.is_file() and not path.is_symlink()),
+                   key=lambda path: path.relative_to(root).as_posix())
+
+    def matches(path_parts, pattern_parts):
+        if not pattern_parts:
+            return not path_parts
+        if pattern_parts[0] == "**":
+            return (matches(path_parts, pattern_parts[1:])
+                    or bool(path_parts) and matches(path_parts[1:], pattern_parts))
+        return (bool(path_parts) and fnmatch.fnmatchcase(path_parts[0], pattern_parts[0])
+                and matches(path_parts[1:], pattern_parts[1:]))
+
     for declaration in declarations:
-        pattern = declaration["path"]
-        paths = sorted(root.glob(pattern)) if declaration.get("glob") else [root / pattern]
-        existing = [path for path in paths if path.is_file()]
+        pattern = declaration["path"].replace("\\", "/")
+        if declaration.get("glob"):
+            pattern_parts = tuple(part for part in pattern.split("/") if part not in {"", "."})
+            existing = [path for path in files
+                        if matches(tuple(path.relative_to(root).as_posix().split("/")), pattern_parts)]
+        else:
+            path = root / pattern
+            existing = [path] if path.is_file() and not path.is_symlink() else []
         if not existing and declaration.get("required", True):
             missing.append(pattern)
         for path in existing:
@@ -125,9 +145,58 @@ def collect_artifacts(root, declarations):
 class StageManifest:
     """Track stage state and hash-addressed file handoffs for one run."""
 
-    def __init__(self, root, mode):
+    def __init__(self, root, mode, *, resume=False):
         self.root = Path(root).resolve()
         self.path = self.root / "stages.json"
+        if resume:
+            if not self.path.is_file():
+                raise ValueError("Cannot resume without stages.json")
+            self.data = read_json(self.path)
+            expected_ids = [item["id"] for item in CONTRACTS[mode]]
+            if (self.data.get("schema_version") != "skill-refiner.stages/v1"
+                    or self.data.get("mode") != mode
+                    or self.data.get("run_id") != self.root.name
+                    or [row.get("id") for row in self.data.get("stages", [])] != expected_ids):
+                raise ValueError("Cannot resume: stage manifest does not match this run contract")
+            if self.data.get("active_stage") not in {None, *expected_ids}:
+                raise ValueError("Cannot resume: stage manifest has an unknown active stage")
+            for stage in self.data["stages"]:
+                if stage.get("status") != "completed":
+                    continue
+                for field in ("artifacts", "input_artifacts"):
+                    inventory = stage.get(field)
+                    if not isinstance(inventory, list):
+                        raise ValueError(f"Cannot resume: completed stage {stage['id']} has no {field} inventory")
+                    for artifact in inventory:
+                        relative = Path(artifact.get("path", ""))
+                        path = (self.root / relative).resolve()
+                        if (relative.is_absolute() or not path.is_relative_to(self.root)
+                                or not path.is_file()):
+                            raise ValueError(f"Cannot resume: completed stage {stage['id']} artifact is missing or unsafe")
+                        data = path.read_bytes()
+                        if (len(data) != artifact.get("bytes")
+                                or hashlib.sha256(data).hexdigest() != artifact.get("sha256")):
+                            raise ValueError(f"Cannot resume: completed stage {stage['id']} artifact changed: {relative}")
+            active = self.data.get("active_stage")
+            if active:
+                stage = next(row for row in self.data["stages"] if row["id"] == active)
+                if stage.get("status") == "running":
+                    self._capture_outputs(stage)
+                    stage["status"] = "pending"
+                    stage["completed_at"] = None
+                    stage["interrupted"] = True
+                    self.data["interrupted_stage"] = active
+            for stage in self.data["stages"]:
+                if stage.get("status") == "blocked":
+                    stage["status"] = "pending"
+                    stage["completed_at"] = None
+            self.data["status"] = "running"
+            self.data["active_stage"] = None
+            self.data.setdefault("resume_count", 0)
+            self.data["resume_count"] += 1
+            self.data["last_resumed_at"] = _now()
+            self._save()
+            return
         self.data = {"schema_version": "skill-refiner.stages/v1", "run_id": self.root.name,
                      "mode": mode, "status": "running", "active_stage": None,
                      "created_at": _now(), "updated_at": _now(),
@@ -139,6 +208,10 @@ class StageManifest:
     def _save(self):
         self.data["updated_at"] = _now()
         write_json(self.path, self.data)
+
+    def is_completed(self, stage_id):
+        stage = next(row for row in self.data["stages"] if row["id"] == stage_id)
+        return stage.get("status") == "completed"
 
     def _artifacts(self, declarations):
         return collect_artifacts(self.root, declarations)
@@ -298,7 +371,7 @@ def verify_stage_manifest(root, *, mode, run_status, allow_active_verification=F
 
 
 REFINE_EVENTS = {"planning": "planning", "coverage_gap": "planning", "baseline": "baseline",
-                 "repairing": "repair", "focused": "regression", "regression": "regression",
+                 "repairing": "repair", "regression": "regression",
                  "acceptance": "acceptance", "passed": "delivery", "unchanged": "delivery"}
 CREATE_EVENTS = {"analyzing": "analysis", "resuming": "analysis", "needs_clarification": "analysis",
                  "reusing_draft": "draft", "creating": "draft", "refining": "refinement",

@@ -53,6 +53,7 @@ class SkillUp:
         self.evaluations = 0
         self.max_evaluations = 50
         self.deadline = None
+        self.progress_callback = None
         self.env = os.environ.copy()
         self._shim_dir = None
         if engine == "codex" and not engine_config:
@@ -146,9 +147,23 @@ class SkillUp:
                 timeout = min(timeout, self.deadline - time.monotonic())
                 if timeout <= 0:
                     raise RefinerError("Wall-clock budget exhausted after waiting for judge lock")
+            engine_label = (self.engine.get("name", self.engine.get("model", "configured"))
+                            if isinstance(self.engine, dict) else "configured")
+            print(json.dumps({"stage": "evaluation", "status": "running", "engine": engine_label,
+                              "case_count": case_count, "case_evaluations_reserved": case_count,
+                              "max_evaluations": self.max_evaluations,
+                              "timeout_seconds": round(timeout)}, ensure_ascii=False), flush=True)
+            def heartbeat(elapsed, remaining):
+                if self.progress_callback:
+                    self.progress_callback(elapsed, remaining, case_count, engine_label, self.evaluations)
+                print(json.dumps({"stage": "evaluation", "status": "still_running", "engine": engine_label,
+                                  "elapsed_seconds": elapsed, "remaining_timeout_seconds": remaining,
+                                  "case_count": case_count, "case_evaluations_reserved": case_count,
+                                  "max_evaluations": self.max_evaluations}, ensure_ascii=False), flush=True)
             code, _, _, duration = run_process(
                 [self.executable, "run", str(config_path), "--output-dir", str(run_dir / "upstream")],
-                timeout=timeout, log=run_dir / "skill-up.log", env=self.env)
+                timeout=timeout, log=run_dir / "skill-up.log", env=self.env,
+                on_progress=heartbeat, progress_interval=30)
         reports = sorted((run_dir / "upstream").glob("iteration-*/result.json"))
         if not reports:
             raise RefinerError(f"skill-up produced no result.json (exit {code}); see {run_dir / 'skill-up.log'}")
@@ -176,11 +191,15 @@ class SkillUp:
                             "evidence": row, "passed": status == "PASS"})
         if code and all(r["passed"] for r in results):
             raise RefinerError("skill-up exited nonzero despite all cases passing")
-        return {"passed": all(r["passed"] for r in results), "cases": results,
+        summary = {"passed": all(r["passed"] for r in results), "cases": results,
                 "seconds": duration, "engine": self.engine, "upstream_exit_code": code,
                 "requested_parallelism": self.parallelism, "effective_parallelism": 1,
                 "execution_note": "Pinned skill-up local script judges serialized to prevent temporary-directory collisions",
                 "upstream_report": str(reports[-1])}
+        counts = {status: sum(row["status"] == status for row in results) for status in ("PASS", "FAIL", "ERROR")}
+        print(json.dumps({"stage": "evaluation", "status": "completed", "seconds": duration,
+                          "case_count": len(results), **counts}, ensure_ascii=False), flush=True)
+        return summary
 
     def evaluate_existing(self, target, run_dir):
         """Preserve and execute native eval.yaml; never claim existing tests ran if unsupported."""

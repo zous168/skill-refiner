@@ -19,6 +19,7 @@ class Matrix:
         self.evaluations = 0
         self.max_evaluations = 50
         self.deadline = None
+        self.progress_callback = None
 
     def evaluate(self, target, cases, run_dir, *, selected=None, existing=True):
         started, rows, engines = time.monotonic(), [], []
@@ -42,6 +43,11 @@ class Matrix:
             backend.max_evaluations = backend.evaluations + max(0, self.max_evaluations - self.evaluations)
             backend.deadline = self.deadline
             before = backend.evaluations
+            def relay_progress(elapsed, remaining, case_count, engine_label, child_evaluations):
+                if self.progress_callback:
+                    used = self.evaluations + max(0, child_evaluations - before)
+                    self.progress_callback(elapsed, remaining, case_count, profile["id"], used)
+            backend.progress_callback = relay_progress
             print(__import__("json").dumps({"stage": "engine", "executor": profile["id"], "cases": len(chosen)}), flush=True)
             result = None
             try:

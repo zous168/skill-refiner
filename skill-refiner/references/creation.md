@@ -6,7 +6,9 @@ during business analysis. From a source checkout:
 
 ```sh
 .venv/bin/skill-refiner create 'Create a local business workflow with these rules ...' \
-  --config /absolute/path/to/backends.json --output /absolute/path/to/new-workspace
+  --config /absolute/path/to/backends.json --output /absolute/path/to/new-workspace --plan-only
+.venv/bin/skill-refiner create --resume-run /absolute/path/to/new-workspace \
+  --config /absolute/path/to/backends.json
 ```
 
 In an installed Skill, use `scripts/launch.py create` to select its saved runtime
@@ -24,11 +26,20 @@ instead of interpolating it into executable shell text.
 3. Freeze the approved analysis and original inputs by hash. Create actual Skill
    instructions, references and working implementations. Reject unsafe/protected
    paths. Static errors allow one bounded regeneration. No author sees held-out tests.
-4. Reuse the real refinement pipeline: independent test planning/review, original
-   baseline, standards review, failure-driven repair, focused and full regression,
-   independent acceptance. Both frozen suites must preserve approved requirement
-   IDs/properties and cover every applicable normal/boundary/error category.
-5. Publish only after all configured executors pass, optionally to a new
+4. Freeze and display `work-plan.md` before target execution. `create --plan-only`
+stops after the first draft and reviewed development/acceptance plans are ready;
+inspect `business-analysis.md`, `work-plan.md` and `test-scenarios.md`, then continue
+the same workspace with `create --resume-run RUN_DIRECTORY`. The parent
+`large-task-tracking` tracks visible progress from this run’s state and events. This is a
+visibility checkpoint, not an approval gate unless a material question remains.
+
+5. Reuse the real refinement pipeline: independent test planning/review, original
+   baseline, standards review, failure-driven repair, one full regression suite per
+   repair round, and independent acceptance. Each full regression includes every
+   failed and previously passing development case. Both frozen suites must preserve
+   approved requirement IDs/properties and cover every applicable normal/boundary/error
+   category.
+6. Publish only after all configured executors pass, optionally to a new
    `--destination`. Preserve drafts, rejected attempts, original inputs and results.
 
 `agents.planning` handles analysis and tests, `agents.review` handles business/test/
@@ -38,10 +49,14 @@ Every role must resolve to a configured backend; the controller does not choose 
 model vendor implicitly.
 They are independently configurable. Role-call and wall-clock budgets cover the
 entire creation plus refinement workflow; no budget resets between stages.
-Create defaults allow up to four plan/review attempts per suite, eight development
-cases and six acceptance cases. `--planning-attempts`, `--max-cases` and
-`--acceptance-cases` override these caps. Revisions receive the prior plan and
-accumulated concrete review issues; rejected versions are preserved.
+Create defaults allow two repair rounds, four plan/review attempts per suite, eight
+development cases, six acceptance cases, 30 minutes and 80 case-executor evaluations.
+Hard caps are three repair rounds, four plan/review attempts, 30 cases per suite, 60
+minutes, 128 agent calls and 200 case-executor evaluations. Budgets cover the whole
+creation, including nested refinement. `--planning-attempts`, `--max-rounds`,
+`--max-seconds`, `--max-agent-calls` and `--max-evaluations` can lower or raise defaults
+within those caps. Revisions receive the prior plan and accumulated concrete review
+issues; rejected versions are preserved.
 
 ## Clarification and help requests
 
@@ -75,6 +90,12 @@ belong in a per-run config passed with `--config`, not a silent global-default e
 
 - `analysis.json`, `business-analysis.md`, `business.lock.json`: business contract,
   workflow, scenario intents and input hash. Questions are saved before approval.
+- `work-plan.md`: design outline, requirement-to-case mapping, acceptance criteria
+  and development/acceptance test checklist, written before target tests run.
+- `state.json`, `stages.json`: internal stage status, resumable checkpoints and
+  artifact hashes. Structured console events include stage transitions and bounded
+evaluation heartbeats for the parent task manager.
+
 - `drafts/` and `draft-manifest.json`: preserved first implementations and findings.
 - `refinement/`: frozen suites, per-engine results, repairs, traces and evidence.
   Use this subdirectory as a future `compare --suite` source.
@@ -88,6 +109,8 @@ Exit 0 with `created` means the full workflow passed. `refinement_status` accura
 records `passed` or `unchanged`. Exit 2 means clarification, rejection, coverage gap,
 execution error, exhausted budget or nonconvergence. Incomplete runs retain drafts
 but do not publish a final Skill or populate the destination. Never relabel them.
+Exit 0 with `planned` means `--plan-only` prepared the reviewed plan but did not run
+baseline, regression or acceptance. Resume it with `create --resume-run` to execute.
 
 `create --resume-from PREVIOUS_CREATION --output NEW_WORKSPACE` validates and reuses
 its frozen approved business contract and original validated draft. If complete

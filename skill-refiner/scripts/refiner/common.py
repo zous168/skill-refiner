@@ -103,6 +103,18 @@ def inventory(root, max_bytes=250_000, priority_paths=()):
 
 def kill_process_tree(pid):
     """Nested adapters may create their own process groups; stop them too."""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, text=True, timeout=5, check=False,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+        return
     descendants = {pid}
     try:
         listing = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=5, check=True)
@@ -125,18 +137,58 @@ def kill_process_tree(pid):
         pass
 
 
-def run_process(argv, *, cwd=None, input_text=None, timeout=300, log=None, env=None):
+def run_process(argv, *, cwd=None, input_text=None, timeout=300, log=None, env=None,
+                on_progress=None, progress_interval=30):
     """Kill the entire process group on timeout, including nested agent processes."""
     started = time.monotonic()
     proc = subprocess.Popen([str(x) for x in argv], cwd=cwd, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True, env=env)
+    deadline = started + timeout
+    pending_input = input_text
     try:
-        stdout, stderr = proc.communicate(input_text, timeout=timeout)
+        while True:
+            remaining = max(0, deadline - time.monotonic())
+            wait_for = min(remaining, max(1, progress_interval)) if on_progress else remaining
+            try:
+                stdout, stderr = proc.communicate(pending_input, timeout=wait_for)
+                break
+            except subprocess.TimeoutExpired:
+                pending_input = None
+                elapsed = time.monotonic() - started
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                if on_progress:
+                    try:
+                        on_progress(round(elapsed, 1), round(remaining, 1))
+                    except Exception:
+                        # Progress reporting must never affect or leak the child process.
+                        pass
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         kill_process_tree(proc.pid)
-        stdout, stderr = proc.communicate()
+        try:
+            # A descendant can keep the inherited stdout/stderr pipes open even
+            # after the parent was terminated. Never let timeout cleanup wait on
+            # those pipes indefinitely.
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired as cleanup_exc:
+            stdout = cleanup_exc.output or getattr(exc, "output", None) or ""
+            stderr = cleanup_exc.stderr or getattr(exc, "stderr", None) or ""
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                proc.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
         if log:
+            Path(log).parent.mkdir(parents=True, exist_ok=True)
             Path(log).write_text(stdout + "\n" + stderr, encoding="utf-8")
         if isinstance(exc, KeyboardInterrupt):
             raise Cancelled(f"Process interrupted: {argv[0]}") from exc
