@@ -18,7 +18,7 @@ from .profiles import load_config
 from .schemas import PLAN, REVIEW
 from .standards import AUTHORING, discover_project_standards, lint
 from .stages import StageManifest, CREATE_EVENTS
-from .plan import write_work_plan
+from .plan import write_test_scenarios, write_work_plan
 
 STRING = {"type": "string", "minLength": 1}
 STRINGS = {"type": "array", "items": STRING}
@@ -637,17 +637,7 @@ def run(args):
             lines += ['', 'Error: ' + state['error']]
         lines += ['', '## Questions / gaps', ''] + ['- ' + q for q in state.get('questions', [])]
         (work / 'report.md').write_text('\n'.join(lines) + '\n')
-        scenarios = ['# Executable scenario inventory', '']
-        for phase, filename in [('Development', 'test-plan.json'), ('Independent acceptance', 'acceptance-plan.json')]:
-            path = work / 'refinement' / filename
-            if path.is_file():
-                scenarios += ['## ' + phase, '']
-                for case in read_json(path)['cases']:
-                    scenarios += [f"### {case['id']} ({case['kind']})", '',
-                                  'Requirements: ' + ', '.join(case['requirement_ids']), case['oracle_reason'],
-                                  '```json', json.dumps({'prompt': case['prompt'], 'inputs': case['files'],
-                                                       'checks': case['checks']}, ensure_ascii=False, indent=2), '```', '']
-        (work / 'test-scenarios.md').write_text('\n'.join(scenarios) + '\n')
+        write_test_scenarios(work)
         if state.get('status') == 'created':
             stages.activate('verification')
             try:

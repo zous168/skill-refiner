@@ -20,7 +20,7 @@ from .standards import AUTHORING, discover_project_standards, lint
 from .profiles import load_config
 from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
-from .plan import write_work_plan
+from .plan import write_test_scenarios, write_work_plan
 
 
 HELPER_EXECUTION_AUDIT = """For every Python helper supplied in case files, inspect its executable source line by line and
@@ -216,6 +216,17 @@ unchanged forwarding; use checks for the concrete observable fields instead."""
 PLANNING += "\n" + HELPER_EXECUTION_AUDIT + "\n"
 PLANNING += "\n" + CONVERSATIONAL_JSON_AUDIT + "\n"
 PLANNING += "\n" + INPUT_BOUNDARY_AUDIT + "\n"
+PLANNING += """
+Each case must include human-readable scenario and expected_outcome fields separate from prompt.
+scenario states the user situation and inputs at a high level; expected_outcome states what observable
+success looks like before machine checks; prompt is only the executor task wording. Do not duplicate the
+full prompt into scenario or expected_outcome."""
+
+PLAN_REVIEW_CASE_BOOLS = (
+    "installed_source_unchanged", "fixture_contract_consistent", "response_contract_consistent",
+    "trace_checks_observable", "scenario_consistent", "requirement_trace_consistent",
+    "expected_outcome_consistent", "machine_checks_consistent",
+)
 
 
 def validate_plan_review(review, plan):
@@ -223,11 +234,15 @@ def validate_plan_review(review, plan):
     jsonschema.validate(review, PLAN_REVIEW)
     contracts = review["case_contracts"]
     expected = {c["id"] for c in plan["cases"]}
-    if len(contracts) != len(expected) or {c["case_id"] for c in contracts} != expected:
+    assessed = [c["case_id"] for c in contracts]
+    if len(assessed) != len(set(assessed)):
+        raise RefinerError("Plan review contains duplicate case assessments")
+    for entry in contracts:
+        if entry["case_id"] not in expected:
+            raise RefinerError(f"Plan review references unknown case: {entry['case_id']}")
+    if len(contracts) != len(expected) or set(assessed) != expected:
         raise RefinerError("Plan review must assess the execution contract of every case exactly once")
-    if review["approved"] and any(not all(c[k] for k in ("installed_source_unchanged", "fixture_contract_consistent",
-                                                         "response_contract_consistent", "trace_checks_observable"))
-                                  for c in contracts):
+    if review["approved"] and any(not all(entry[k] for k in PLAN_REVIEW_CASE_BOOLS) for entry in contracts):
         raise RefinerError("Approved plan review contains a conflicting execution contract")
 
 
@@ -342,7 +357,12 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2):
                            "values. If file_json_path_equal checks inspect other fields in the same file, ensure the "
                            "known-good files fixture supplies every checked pointer consistently with good_response; "
                            "the runtime helper must overwrite/remove that control fixture and capture fresh evidence. "
-                           "Approve only a useful executable suite. " + HELPER_EXECUTION_AUDIT + " "
+                           "Approve only a useful executable suite. For EACH case set scenario_consistent, "
+                           "requirement_trace_consistent, expected_outcome_consistent and machine_checks_consistent "
+                           "to true only when the frozen scenario and expected_outcome align with linked requirement "
+                           "IDs and their sources and every check's expected value actually verifies that outcome. "
+                           "Reject approval when any case is unassessed, duplicated, unknown, or marked false. "
+                           + HELPER_EXECUTION_AUDIT + " "
                            + CONVERSATIONAL_JSON_AUDIT + " " + INPUT_BOUNDARY_AUDIT,
                            {"context": context, "plan": plan}, PLAN_REVIEW)
         try:
@@ -943,6 +963,7 @@ def run(args):
         stages.complete("planning")
         state["plan_ready"] = True
         write_work_plan(work, source=source, plan=plan, acceptance=acceptance, limits=limits)
+        write_test_scenarios(work, plan=plan, acceptance=acceptance)
         event("plan_ready", work_plan=str(work / "work-plan.md"),
               requirements=len(plan["requirements"]), development_cases=len(plan["cases"]),
               acceptance_cases=len(acceptance["cases"]), max_rounds=args.max_rounds,

@@ -369,6 +369,12 @@ def validate_plan(plan, root, max_cases=8):
         if case["id"] in ids:
             raise RefinerError(f"Duplicate case ID: {case['id']}")
         ids.add(case["id"])
+        for field in ("scenario", "expected_outcome"):
+            value = case.get(field, "")
+            if not isinstance(value, str) or not value.strip():
+                raise RefinerError(f"Case {case['id']} missing required {field}")
+            if value.strip() == case["prompt"].strip():
+                raise RefinerError(f"Case {case['id']} {field} must be separate from the executor prompt")
         if not set(case["requirement_ids"]) <= requirements.keys():
             raise RefinerError(f"Unknown requirement reference: {case['id']}")
         covered.update(case["requirement_ids"])

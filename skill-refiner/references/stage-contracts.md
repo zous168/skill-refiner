@@ -35,7 +35,7 @@ new run rather than trusting or overwriting that evidence. `--reuse-plan` remain
 new-run path and must not be combined with `--resume-from`.
 
 Use `run --plan-only` for the visibility checkpoint before tests. It freezes and
-validates both plans, writes `work-plan.md`, then returns `status=planned` without
+validates both plans, writes `work-plan.md` and `test-scenarios.md`, then returns `status=planned` without
 executing baseline, regression or acceptance. Read the plan and continue the same
 workspace with `run --resume-from RUN_DIRECTORY`; plan calls are reused. Creation uses
 the same checkpoint through `create --plan-only` and resumes with `create --resume-run`.
@@ -54,8 +54,11 @@ different contract or changed completed artifact is rejected; higher time, call,
 evaluation, planning or round budgets can be supplied when continuing.
 
 The human-readable `work-plan.md` presents the design/requirement map, acceptance
-criteria and frozen case checklist before execution. It has no live statuses and is
-written when the relevant plan is frozen. The parent task manager reports progress
+criteria and frozen case checklist before execution. Each case shows its scenario,
+expected outcome, linked requirement sources, machine checks and expected values,
+and oracle rationale. `test-scenarios.md` contains the corresponding executable
+development and acceptance scenario inventory. These files have no live statuses
+and are written when the relevant plan is frozen. The parent task manager reports progress
 from structured events and internal checkpoints. One full regression run per repair
 round includes affected and previously passing development cases, so there is no extra
 focused pass before it.

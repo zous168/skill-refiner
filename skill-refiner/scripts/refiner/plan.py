@@ -1,6 +1,7 @@
 """Generate the frozen design and test checklist artifact."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 
@@ -9,6 +10,50 @@ from .common import read_json
 
 def _md(value):
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _format_check_value(value):
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _format_check_line(check):
+    parts = [check["type"]]
+    for key in ("path", "pointer", "control_command", "control_tool_name"):
+        if key in check:
+            parts.append(f"{key}={check[key]!r}")
+    if "expected_exit_code" in check:
+        parts.append(f"expected_exit_code={check['expected_exit_code']}")
+    if "literal_command" in check:
+        parts.append(f"literal_command={check['literal_command']}")
+    parts.append(f"expected={_format_check_value(check.get('value'))}")
+    return "; ".join(parts)
+
+
+def _requirement_detail(requirement_ids, requirements):
+    by_id = {row["id"]: row for row in requirements}
+    lines = []
+    for rid in requirement_ids:
+        row = by_id.get(rid)
+        if row:
+            lines.append(f"  - **{rid}:** {_md(row['behavior'])} (source: {_md(row.get('source', ''))})")
+        else:
+            lines.append(f"  - **{rid}:** unknown requirement")
+    return lines
+
+
+def _render_case_block(case, requirements):
+    lines = [f"- [ ] **{case['id']} ({case['kind']})**",
+             f"  - Scenario: {_md(case.get('scenario', ''))}",
+             f"  - Expected outcome: {_md(case.get('expected_outcome', ''))}",
+             "  - Linked requirements:"]
+    lines.extend(_requirement_detail(case["requirement_ids"], requirements))
+    lines.append("  - Machine checks:")
+    for check in case.get("checks", []):
+        lines.append(f"    - {_md(_format_check_line(check))}")
+    lines.append(f"  - Oracle rationale: {_md(case.get('oracle_reason', ''))}")
+    return lines
 
 
 def _source_overview(source):
@@ -91,24 +136,25 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
               "- Every required behavior is covered by the frozen, independently reviewed cases.",
               "- Each configured executor passes the full independent acceptance suite.",
               "- The delivered candidate matches the verified source and its evidence."]
+    req_rows = list(requirements)
     if acceptance:
+        acceptance_reqs = acceptance.get("requirements") or req_rows
         lines += ["", "### Frozen acceptance cases", ""]
         for case in acceptance.get("cases", []):
-            lines.append(f"- **{case['id']} ({case['kind']})** — requirements: "
-                         f"{', '.join(case['requirement_ids'])}; checks: {len(case['checks'])}; "
-                         f"oracle: {_md(case['oracle_reason'])}")
+            lines.extend(_render_case_block(case, acceptance_reqs))
+            lines.append("")
     lines += ["", "## Test checklist", ""]
     for label, suite_plan in (("Development / baseline and regression", plan),
                               ("Independent acceptance", acceptance)):
         lines += [f"### {label}", ""]
         if suite_plan:
+            suite_reqs = suite_plan.get("requirements") or req_rows
             for case in suite_plan.get("cases", []):
-                lines.append(f"- [ ] **{case['id']} ({case['kind']})**; requirements: "
-                             f"{', '.join(case['requirement_ids'])}; checks: {len(case['checks'])}; "
-                             f"{_md(case['oracle_reason'])}")
+                lines.extend(_render_case_block(case, suite_reqs))
+                lines.append("")
         else:
             lines.append("- Waiting for the reviewed, frozen plan.")
-        lines.append("")
+            lines.append("")
     lines += ["## Execution limits", ""]
     limits = limits or {}
     for key, label in (("max_rounds", "Repair rounds"), ("max_seconds", "Wall-clock seconds"),
@@ -117,5 +163,51 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
         if key in limits:
             lines.append(f"- {label}: at most {limits[key]}")
     (work / "work-plan.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _suite_case_markdown(phase, suite):
+    lines = [f"## {phase}", ""]
+    req_by_id = {row["id"]: row for row in suite.get("requirements", [])}
+    for case in suite["cases"]:
+        req_lines = []
+        for rid in case["requirement_ids"]:
+            row = req_by_id.get(rid, {})
+            req_lines.append(
+                f"- {rid}: {row.get('behavior', 'unknown')} (source: {row.get('source', '')})"
+            )
+        check_lines = ["- " + _format_check_line(check) for check in case["checks"]]
+        lines += [
+            f"### {case['id']} ({case['kind']})", "",
+            f"Scenario: {case.get('scenario', '')}",
+            f"Expected outcome: {case.get('expected_outcome', '')}",
+            "Linked requirements:", *req_lines,
+            "Machine checks:", *check_lines,
+            f"Oracle rationale: {case['oracle_reason']}",
+            "```json",
+            json.dumps({"prompt": case["prompt"], "inputs": case["files"]}, ensure_ascii=False, indent=2),
+            "```", "",
+        ]
+    return lines
+
+
+def write_test_scenarios(work, *, plan=None, acceptance=None):
+    """Write the frozen development and acceptance case inventory."""
+    work = Path(work)
+    if plan is None:
+        for candidate in (work / "test-plan.json", work / "refinement" / "test-plan.json"):
+            if candidate.is_file():
+                plan = read_json(candidate)
+                break
+    if acceptance is None:
+        for candidate in (work / "acceptance-plan.json", work / "refinement" / "acceptance-plan.json"):
+            if candidate.is_file():
+                acceptance = read_json(candidate)
+                break
+    lines = ["# Executable scenario inventory", ""]
+    if plan:
+        lines.extend(_suite_case_markdown("Development", plan))
+    if acceptance:
+        lines.extend(_suite_case_markdown("Independent acceptance", acceptance))
+    (work / "test-scenarios.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

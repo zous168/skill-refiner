@@ -99,8 +99,9 @@ evaluation heartbeats for the parent task manager.
 - `drafts/` and `draft-manifest.json`: preserved first implementations and findings.
 - `refinement/`: frozen suites, per-engine results, repairs, traces and evidence.
   Use this subdirectory as a future `compare --suite` source.
-- `test-scenarios.md`: actual development/acceptance prompts, input fixtures,
-  independent checks and requirement mappings, with each scenario category.
+- `test-scenarios.md`: development/acceptance scenarios and expected outcomes,
+  actual prompts, input fixtures, linked requirement sources, every independent
+  check and expected value, and oracle rationales.
 - `final/<name>/`, `final/creation.patch`, `final/changes.patch`, `final/evidence.json`:
   accepted Skill, complete creation diff, draft-to-final repair diff and evidence.
   The repair diff can be empty if the first implementation already passes.

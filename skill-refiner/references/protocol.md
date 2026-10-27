@@ -22,14 +22,22 @@ Refinement roles are `plan`, `acceptance-plan`, `plan-review`,
 `standards-review` and `repair`. Schemas are in `scripts/refiner/schemas.py`.
 This is an adapter interface, not an offline substitute for actual LLM planning.
 
-Plan reviews include `case_contracts`, one entry per case with `case_id`,
+Every plan case requires nonblank `scenario` and `expected_outcome` fields separate
+from `prompt`. `scenario` describes the user's situation, preconditions, input/state
+and trigger; `expected_outcome` states observable success. `prompt` contains only the
+executor's task wording.
+
+Plan reviews include exactly one `case_contracts` entry per case with `case_id`,
 `installed_source_unchanged`, `fixture_contract_consistent`,
-`response_contract_consistent`, `trace_checks_observable` and a concrete `basis`.
-Approval requires every entry to agree with installed-source immutability and the
-actual fixture instructions. Review executable helpers through their full assertion
-and evidence-write path, including working-directory and relative/absolute path
-semantics; a correct target must not fail a helper's contradictory assertion. The
-controller rejects incomplete or contradictory approvals before freezing the suite.
+`response_contract_consistent`, `trace_checks_observable`, `scenario_consistent`,
+`requirement_trace_consistent`, `expected_outcome_consistent`,
+`machine_checks_consistent` and a concrete `basis`. The last four flags assess the
+scenario, linked requirement IDs and sources, expected outcome, and every check's
+expected value as one traceable contract. Approval requires every flag to be true.
+Missing, duplicate, unknown or contradictory case assessments are rejected before
+the suite is frozen. Review executable helpers through their full assertion and
+evidence-write path, including working-directory and relative/absolute path
+semantics; a correct target must not fail a helper's contradictory assertion.
 
 Repair input includes `failure_evidence`: bounded excerpts of actual development
 execution artifacts with original byte counts, SHA256, source path/archive member,
