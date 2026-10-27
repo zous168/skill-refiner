@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>GoalExecutor · 任务进度</title>
+  <style>
+    :root{font-family:Segoe UI,"Microsoft YaHei",system-ui,sans-serif;color-scheme:light dark;--bg:#f4f6f8;--panel:#fff;--ink:#17202a;--muted:#65717d;--line:#dce2e7;--accent:#276ef1;--good:#16804a;--warn:#a65b00;--bad:#b42318;--shadow:0 8px 28px #17202a0d}
+    @media(prefers-color-scheme:dark){:root{--bg:#11161c;--panel:#1a222b;--ink:#e7edf3;--muted:#a0adba;--line:#34414e;--accent:#7da8ff;--good:#70d6a1;--warn:#ffc36e;--bad:#ff9388;--shadow:0 8px 28px #0003}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink)}header,main{width:min(1120px,calc(100% - 32px));margin:auto}header{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;padding:30px 0 22px;border-bottom:1px solid var(--line)}h1{font-size:clamp(24px,4vw,34px);line-height:1.15;margin:7px 0}h2{font-size:16px;margin:0 0 14px}p{margin:0}.eyebrow,.muted,.meta{color:var(--muted)}.eyebrow{font-size:11px;letter-spacing:.12em;font-weight:700}.toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:flex-end}.pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:5px 10px;font-size:12px;font-weight:650}.pill.complete,.pill.verified{color:var(--good);border-color:color-mix(in srgb,var(--good) 45%,var(--line))}.pill.blocked{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}.pill.continue,.pill.in_progress{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}.pill.pending{color:var(--muted)}button{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:9px;padding:8px 12px;font:inherit;cursor:pointer}button:hover{border-color:var(--accent)}main{padding:20px 0 42px}.notice{padding:10px 12px;border-radius:9px;margin-bottom:14px;background:color-mix(in srgb,var(--accent) 12%,var(--panel));color:var(--ink)}.notice.error{background:color-mix(in srgb,var(--bad) 13%,var(--panel))}.hidden{display:none!important}.grid{display:grid;grid-template-columns:1.35fr .85fr;gap:14px}.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:var(--shadow);min-width:0}.wide{grid-column:1/-1}.goal{font-size:17px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}.meta{font-size:12px;line-height:1.6;margin-top:10px;overflow-wrap:anywhere}.bar-wrap{height:9px;background:var(--line);border-radius:99px;overflow:hidden;margin:10px 0 7px}.bar{height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .25s ease}.row{padding:12px 0;border-top:1px solid var(--line)}.row:first-child{border-top:0;padding-top:0}.row-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.row-title{font-weight:650;overflow-wrap:anywhere}.row-detail{font-size:13px;line-height:1.5;color:var(--muted);margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}.list{display:grid;gap:9px}.empty{color:var(--muted);font-size:13px}.statline{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.stat{border:1px solid var(--line);border-radius:9px;padding:8px 10px;font-size:13px}.stat strong{font-size:16px;margin-right:5px}.constraints{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.tag{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:4px 9px;color:var(--muted);overflow-wrap:anywhere}.error-text{color:var(--bad)}.indent{display:inline-block;vertical-align:middle;height:1px}    footer{color:var(--muted);font-size:12px;margin-top:16px;text-align:right}table.tree{width:100%;border-collapse:collapse;font-size:13px}table.tree th,table.tree td{border-bottom:1px solid var(--line);padding:8px 6px;text-align:left;vertical-align:top}table.tree th{color:var(--muted);font-size:12px;font-weight:650}.layers{color:var(--muted);line-height:1.6}tr.current td{background:color-mix(in srgb,var(--accent) 12%,transparent)}@media(max-width:760px){header{align-items:flex-start;flex-direction:column}.toolbar{justify-content:flex-start}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}
+  </style>
+</head>
+<body>
+  <header>
+    <div><div class="eyebrow">GOALEXECUTOR · LIVE VIEW</div><h1>任务计划与进度</h1><p id="taskId" class="meta">正在读取任务…</p></div>
+    <div class="toolbar"><span id="taskStatus" class="pill continue">同步中</span><button id="refresh" type="button">立即同步</button><span id="updated" class="meta">—</span></div>
+  </header>
+  <main>
+    <div id="notice" class="notice hidden" role="status"></div>
+    <div class="grid">
+      <section class="card"><h2>当前目标</h2><p id="goal" class="goal">—</p><div id="constraints" class="constraints"></div><p id="current" class="meta"></p><p id="blockReason" class="meta error-text"></p></section>
+      <section class="card"><h2>验收进度</h2><div id="progressLabel" class="row-title">—</div><div class="bar-wrap"><div id="progressBar" class="bar"></div></div><p id="progressHint" class="meta">按已验证的必需标准计算</p><div id="counts" class="statline"></div></section>
+      <section class="card wide"><h2>验收标准</h2><div id="criteria" class="list"></div></section>
+      <section class="card wide"><h2>阶段计划</h2><div id="plan" class="list"></div></section>
+      <section class="card wide"><h2>任务层级</h2><p id="treeSource" class="meta"></p><div id="tree"></div></section>
+      <section class="card"><h2>范围变更</h2><div id="changes" class="list"></div></section>
+      <section class="card"><h2>运行计数</h2><div id="runtime" class="list"></div></section>
+      <section class="card"><h2>子任务回执</h2><div id="agents" class="list"></div></section>
+      <section class="card"><h2>交付物索引</h2><div id="artifacts" class="list"></div></section>
+    </div>
+    <footer>只读看板 · 每 3 秒读取快照与 runtime · 状态以任务 JSON 为准</footer>
+  </main>
+  <script>
+    (()=>{
+      const $=id=>document.getElementById(id), query=new URLSearchParams(location.search);
+      const requestedTask=query.get("task_id"), actor=query.get("actor");
+      let taskId=requestedTask, loading=false, hasSnapshot=false;
+      const safeId=value=>typeof value==="string"&&/^[A-Za-z0-9_-]{1,96}$/.test(value);
+      const showNotice=(message,error=false)=>{const el=$("notice");el.textContent=message;el.classList.toggle("error",error);el.classList.toggle("hidden",!message)};
+      const asText=value=>typeof value==="string"?value:value==null?"—":JSON.stringify(value);
+      const statusLabel=value=>({continue:"进行中",complete:"已完成",blocked:"已阻塞",pending:"待开始",in_progress:"执行中",verified:"已验证",superseded:"已替代"}[value]||value||"未设置");
+      const setPill=(el,status)=>{const tone=["complete","verified","blocked","continue","in_progress","pending"].includes(status)?status:"pending";el.textContent=statusLabel(status);el.className="pill "+tone};
+      const makeRow=(title,detail,status)=>{const row=document.createElement("div");row.className="row";const top=document.createElement("div");top.className="row-top";const label=document.createElement("div");label.className="row-title";label.textContent=title||"未命名";top.append(label);if(status){const pill=document.createElement("span");setPill(pill,status);top.append(pill)}row.append(top);if(detail){const body=document.createElement("div");body.className="row-detail";body.textContent=detail;row.append(body)}return row};
+      const fillList=(id,items,empty)=>{const box=$(id);box.replaceChildren();if(!items||!items.length){const line=document.createElement("p");line.className="empty";line.textContent=empty;box.append(line);return}for(const item of items)box.append(item)};
+      const fetchJSON=async path=>{const response=await fetch(path+(path.includes("?")?"&":"?")+"_ts="+Date.now(),{cache:"no-store"});if(!response.ok)throw new Error(`${path}：HTTP ${response.status}`);return response.json()};
+      async function resolveTaskId(){if(taskId){if(!safeId(taskId))throw new Error("task_id 格式无效");return taskId}if(actor){if(!safeId(actor))throw new Error("actor 格式无效");const pointer=await fetchJSON(`current-${encodeURIComponent(actor)}.json`);if(!safeId(pointer.task_id))throw new Error("current 指针中没有有效 task_id");taskId=pointer.task_id;return taskId}throw new Error("请用 ?task_id=GE-... 打开当前任务；也可用 ?actor=<执行人> 读取 current 指针。");}
+      function render(snapshot,runtime){
+        const criteria=Array.isArray(snapshot.success_criteria)?snapshot.success_criteria:[];
+        const active=criteria.filter(item=>item.status!=="superseded"),verified=active.filter(item=>item.status==="verified").length;
+        const percent=active.length?Math.round(verified/active.length*100):0;
+        $("taskId").textContent=`${snapshot.task_id||taskId} · ${snapshot.status||"状态未设置"}`;
+        setPill($("taskStatus"),snapshot.status||"continue");$("goal").textContent=asText(snapshot.global_goal);
+        $("current").textContent=snapshot.current_subtask?`当前阶段：${snapshot.current_subtask}`:"当前阶段：未设置";
+        $("blockReason").textContent=snapshot.block_reason?`阻塞原因：${snapshot.block_reason}`:"";
+        $("progressLabel").textContent=active.length?`${verified} / ${active.length} 项必需标准已验证`:"尚未定义有效验收标准";
+        $("progressBar").style.width=percent+"%";
+        $("progressHint").textContent=`${percent}% · 仅统计 status=verified；superseded 标准不计入`;
+        const counts=$("counts");counts.replaceChildren();[["已完成",(snapshot.done||[]).length],["待办",(snapshot.pending||[]).length],["子任务",(snapshot.child_agent_calls||[]).length]].forEach(([label,count])=>{const box=document.createElement("div");box.className="stat";const strong=document.createElement("strong");strong.textContent=count;box.append(strong,document.createTextNode(label));counts.append(box)});
+        const constraints=$("constraints");constraints.replaceChildren();(snapshot.constraints||[]).forEach(value=>{const tag=document.createElement("span");tag.className="tag";tag.textContent=asText(value);constraints.append(tag)});
+        fillList("criteria",criteria.map(item=>makeRow(`${item.id||"G?"} · ${item.criterion||"未命名标准"}`,item.evidence_ref?`证据：${asText(item.evidence_ref)}`:"尚无证据引用",item.status)),"暂无验收标准");
+        const calls=Array.isArray(snapshot.child_agent_calls)?snapshot.child_agent_calls:[];
+        const activeIds=new Set(calls.map(item=>item.subtask_id));
+        const currentMatch=String(snapshot.current_subtask||"").match(/^\s*(A\d+)/);
+        const currentId=currentMatch?currentMatch[1]:null;
+        const plan=[];
+        (snapshot.done||[]).forEach(item=>plan.push(makeRow(asText(item),"", "complete")));
+        (snapshot.todo_specs||[]).forEach(item=>{const status=activeIds.has(item.subtask_id)||item.subtask_id===currentId?"in_progress":"pending";plan.push(makeRow(`${item.subtask_id||"A?"} · ${item.title||"未命名待办"}`,item.done_when||"未定义完成条件",status))});
+        if(!plan.length)(snapshot.pending||[]).forEach(item=>plan.push(makeRow(asText(item),"","pending")));
+        fillList("plan",plan,"暂无阶段计划");
+        loadTaskTree(snapshot);
+        fillList("changes",(snapshot.goal_changes||[]).map(item=>makeRow(item.at||"范围变更",item.change||item.description||asText(item),"")),"没有记录范围变更");
+        const excluded=/fingerprint|raw|log|prompt/i;
+        const runtimeLabel={round:"主Agent检查点",max_rounds:"检查点上限",stagnant_streak:"连续停滞次数",started_at:"运行开始时间",deadline_at:"运行截止时间",agent_calls:"Agent调用次数",max_agent_calls:"Agent调用上限",evaluations:"评估次数",max_evaluations:"评估上限",last_heartbeat:"最近心跳"};
+        const runtimeRows=runtime?Object.entries(runtime).filter(([key,value])=>!excluded.test(key)&&(typeof value!=="object"||value===null)).map(([key,value])=>makeRow(runtimeLabel[key]||key,asText(value),"")):[];
+        fillList("runtime",runtimeRows,"暂无 runtime 计数");
+        fillList("agents",calls.map(item=>makeRow(`${item.subtask_id||"子任务"} · ${item.title||item.role||"执行中"}`,item.done_when||"等待主Agent收取回执","in_progress")),"没有未完成的子Agent调用");
+        const artifacts=snapshot.artifacts_ref&&typeof snapshot.artifacts_ref==="object"?Object.entries(snapshot.artifacts_ref):[];
+        fillList("artifacts",artifacts.map(([id,title])=>makeRow(id,asText(title),"")),"暂无交付物索引");
+      }
+      function normalizeTasks(list){return (Array.isArray(list)?list:[]).map(item=>{if(!item||typeof item!=="object")return null;const rawId=typeof item.id==="string"?item.id:item.subtask_id;const id=typeof rawId==="string"?rawId.trim():"";if(!id)return null;const rawParent=typeof item.parentId==="string"?item.parentId:item.parent_id;const parent=typeof rawParent==="string"?rawParent.trim():"";return {id,parentId:parent&&parent!==id?parent:null,title:typeof item.title==="string"?item.title:"",status:typeof item.status==="string"?item.status:"pending"}}).filter(Boolean)}
+      function orderTasks(tasks){const byParent=new Map();tasks.forEach(task=>{const key=task.parentId||"";if(!byParent.has(key))byParent.set(key,[]);byParent.get(key).push(task)});const out=[],seen=new Set();function walk(parentId){(byParent.get(parentId)||[]).forEach(task=>{if(seen.has(task.id))return;seen.add(task.id);out.push(task);walk(task.id)})}walk("");tasks.forEach(task=>{if(seen.has(task.id))return;seen.add(task.id);out.push(task);walk(task.id)});return out}
+      function taskDepth(task,byId){let depth=0,id=task.parentId;const seen=new Set([task.id]);while(id&&byId.has(id)&&!seen.has(id)){seen.add(id);depth++;id=byId.get(id).parentId}return depth}
+      function currentTaskId(current,tasks){const value=String(current||"").trim();if(!value)return null;const separators=[" ","　","·",":","："];return tasks.filter(task=>value===task.id||separators.some(separator=>value.startsWith(task.id+separator))).sort((a,b)=>b.id.length-a.id.length)[0]?.id||null}
+      function paintTree(tasks,current){const box=$("tree"),note=$("treeSource");box.replaceChildren();const rows=orderTasks(normalizeTasks(tasks));if(!rows.length){note.textContent="要多层时，在快照 tasks 里用 parentId 指向父任务，可以继续往下挂。";const line=document.createElement("p");line.className="empty";line.textContent="还没有任务层级。";box.append(line);return}note.textContent="";const byId=new Map(rows.map(item=>[item.id,item]));const activeId=currentTaskId(current,rows);const table=document.createElement("table");table.className="tree";const head=document.createElement("thead");const hr=document.createElement("tr");["任务","状态"].forEach(name=>{const th=document.createElement("th");th.textContent=name;hr.append(th)});head.append(hr);table.append(head);const body=document.createElement("tbody");rows.forEach(task=>{const tr=document.createElement("tr");if(task.id===activeId)tr.className="current";const title=document.createElement("td");const pad=document.createElement("span");pad.className="indent";pad.style.width=(taskDepth(task,byId)*18)+"px";title.append(pad,document.createTextNode(`${task.id}  ${task.title}`.trim()));const state=document.createElement("td");state.textContent=statusLabel(task.status==="done"?"complete":task.status);tr.append(title,state);body.append(tr)});table.append(body);box.append(table)}
+      function loadTaskTree(snapshot){paintTree(snapshot.tasks,snapshot.current_subtask)}
+      async function sync(){if(loading||document.visibilityState==="hidden")return;loading=true;try{const id=await resolveTaskId();const snapshot=await fetchJSON(`snapshots/${encodeURIComponent(id)}.json`);let runtime=null;try{runtime=await fetchJSON(`runtime/${encodeURIComponent(id)}.json`)}catch(_){runtime=null}render(snapshot,runtime);hasSnapshot=true;showNotice("");$("updated").textContent="同步于 "+new Date().toLocaleTimeString("zh-CN")}catch(error){showNotice((hasSnapshot?"上次快照仍保留。":"无法读取任务数据。")+" "+error.message,true)}finally{loading=false}}
+      $("refresh").addEventListener("click",sync);document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")sync()});sync();setInterval(sync,3000);
+    })();
+  </script>
+</body>
+</html>
