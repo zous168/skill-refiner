@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import jsonschema
 
@@ -13,14 +20,18 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from refiner.checks import validate_plan  # noqa: E402
-from refiner.common import PlanGateError, RefinerError, read_json, run_process, write_json  # noqa: E402
+from refiner.agent import Agent as RefinerAgent  # noqa: E402
+from refiner.common import (PlanGateError, RefinerError, inventory, manifest, read_json,
+                            run_process, write_json)  # noqa: E402
 from refiner.creation import ANALYSIS, analysis_markdown, validate_analysis  # noqa: E402
-from refiner.plan import write_test_scenarios, write_work_plan  # noqa: E402
-from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate, initial_phase_results, make_plan,
+from refiner.plan import _source_overview, write_test_scenarios, write_work_plan  # noqa: E402
+from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate,
+                              close_incomplete_planning_phases, initial_phase_results, make_plan,
                                require_plan_gate, set_phase_result, validate_plan_review)  # noqa: E402
 from refiner.gate import (_verify_phase_history, _verify_plan_control_artifacts,
                           _verify_plan_review_artifacts)  # noqa: E402
-from refiner.runtime import codex_output_schema, cursor_command, decode_codex_response  # noqa: E402
+from refiner.runtime import api_request, codex_output_schema, cursor_command, decode_codex_response  # noqa: E402
+from refiner.stages import collect_artifacts  # noqa: E402
 
 
 class CodexWireSchemaTests(unittest.TestCase):
@@ -53,6 +64,172 @@ class CodexWireSchemaTests(unittest.TestCase):
             [sys.executable, "-X", "utf8", "-c", "print('实际字段：已通过')"], timeout=10)
         self.assertEqual(code, 0, stderr)
         self.assertIn("实际字段：已通过", stdout)
+
+
+class ControllerCallTimeoutTests(unittest.TestCase):
+    def test_call_timeout_uses_the_smaller_profile_or_remaining_run_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            agent = RefinerAgent(root, timeout=240)
+            agent.deadline = time.monotonic() + 10
+            self.assertAlmostEqual(agent._call_timeout({"timeout": 3}), 3)
+            remaining = agent._call_timeout({})
+            self.assertGreater(remaining, 0)
+            self.assertLessEqual(remaining, 10)
+            agent.deadline = time.monotonic() - 1
+            with self.assertRaisesRegex(RefinerError, "budget exhausted"):
+                agent._call_timeout({})
+
+    def test_timed_out_controller_call_persists_terminal_error_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            command = " ".join(shlex.quote(part) for part in (
+                sys.executable, "-c", "import time; time.sleep(5)"))
+            agent = RefinerAgent(root, command=command, timeout=30)
+            agent.deadline = time.monotonic() + 0.2
+            schema = {"type": "object", "required": ["ok"],
+                      "properties": {"ok": {"type": "boolean"}}}
+            with redirect_stdout(StringIO()), self.assertRaisesRegex(RefinerError, "timed out"):
+                agent.ask("plan", "Return the required JSON.", {}, schema)
+
+            call_dir = Path(root) / "agent-calls" / "001-plan"
+            request = read_json(call_dir / "request-manifest.json")
+            execution = read_json(call_dir / "execution.json")
+            self.assertEqual(request["status"], "execution_error")
+            self.assertEqual(execution["status"], "execution_error")
+            self.assertLessEqual(execution["timeout_seconds"], 0.2)
+            self.assertIn("timed out", execution["error"].lower())
+            self.assertTrue((call_dir / "process.log").is_file())
+
+    def test_managed_backend_receives_run_deadline_and_persists_stream_log_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"agents": {"planning": {"backend": "codex", "timeout": 2}}}
+            agent = RefinerAgent(root, config=config, timeout=30)
+            agent.deadline = time.monotonic() + 5
+            schema = {"type": "object", "required": ["ok"],
+                      "properties": {"ok": {"type": "boolean"}}}
+            with patch("refiner.runtime.execute", return_value={
+                    "final_message": json.dumps({"ok": True})}) as execute:
+                agent.ask("plan", "Return the required JSON.", {}, schema)
+            self.assertAlmostEqual(execute.call_args.args[3], 2)
+            self.assertEqual(execute.call_args.kwargs["log_path"],
+                             Path(root) / "agent-calls" / "001-plan" / "process.log")
+
+
+class OpenAICompatibleRequestTimeoutTests(unittest.TestCase):
+    @staticmethod
+    def _server(handler):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        return server, server_thread
+
+    @staticmethod
+    def _close_server(server, server_thread):
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
+
+    def test_http_worker_returns_a_valid_model_response(self):
+        response_body = b'{"choices":[{"message":{"content":"ok"}}],"usage":{"total_tokens":3}}'
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+
+            def log_message(self, *_args):
+                pass
+
+        server, server_thread = self._server(Handler)
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                log_path = Path(root) / "process.log"
+                message, usage = api_request(
+                    {"base_url": f"http://127.0.0.1:{server.server_port}", "model": "local-test"},
+                    [{"role": "user", "content": "hello"}], [], 5, cwd=root, log_path=log_path)
+                self.assertTrue(log_path.is_file())
+        finally:
+            self._close_server(server, server_thread)
+        self.assertEqual(message, {"content": "ok"})
+        self.assertEqual(usage, {"total_tokens": 3})
+
+    def test_slow_drip_http_response_is_killed_at_the_call_deadline(self):
+        request_seen = threading.Event()
+        response_body = b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                request_seen.set()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                for byte in response_body:
+                    try:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                    except OSError:
+                        return
+                    time.sleep(0.1)
+
+            def log_message(self, *_args):
+                pass
+
+        server, server_thread = self._server(Handler)
+        started = time.monotonic()
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(RefinerError, "Process timed out"):
+                    api_request(
+                        {"base_url": f"http://127.0.0.1:{server.server_port}", "model": "local-test"},
+                        [{"role": "user", "content": "hello"}], [], 2, cwd=root)
+            elapsed = time.monotonic() - started
+            self.assertTrue(request_seen.is_set(), "the HTTP worker must reach the slow server before timing out")
+            self.assertLess(elapsed, 3.5, f"the request exceeded its two-second hard deadline: {elapsed:.2f}s")
+        finally:
+            self._close_server(server, server_thread)
+
+
+class StageArtifactCollectionTests(unittest.TestCase):
+    def test_original_glob_normalizes_windows_separators_and_collects_nested_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "original" / "references" / "guide.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("frozen source", encoding="utf-8")
+            artifacts, missing = collect_artifacts(Path(root), [
+                {"path": r"original\**", "glob": True},
+            ])
+            self.assertEqual(missing, [])
+            self.assertEqual([item["path"] for item in artifacts],
+                             ["original/references/guide.md"])
+            self.assertEqual(artifacts[0]["bytes"], len(b"frozen source"))
+
+    def test_required_glob_with_no_files_is_reported_missing(self):
+        with tempfile.TemporaryDirectory() as root:
+            artifacts, missing = collect_artifacts(Path(root), [
+                {"path": r"original\**", "glob": True},
+            ])
+            self.assertEqual(artifacts, [])
+            self.assertEqual(missing, ["original/**"])
+
+
+class BackupInventoryTests(unittest.TestCase):
+    def test_before_backup_files_are_excluded_from_manifest_inventory_and_overview(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            scripts = root / "scripts" / "refiner"
+            scripts.mkdir(parents=True)
+            (scripts / "agent.py").write_text("current", encoding="utf-8")
+            (scripts / "agent.py.before-old").write_text("stale", encoding="utf-8")
+            self.assertEqual({Path(item).as_posix() for item in manifest(root)},
+                             {"scripts/refiner/agent.py"})
+            self.assertEqual({Path(item["path"]).as_posix() for item in inventory(root)},
+                             {"scripts/refiner/agent.py"})
+            _, overview = _source_overview(root)
+            self.assertEqual([item for kind, item in overview if kind == "file"],
+                             ["scripts/refiner/agent.py"])
 
 
 def _case(case_id, kind, scenario, expected_outcome, prompt, requirement_id="R1"):
@@ -315,6 +492,17 @@ class PlanRevisionAndPhaseGateTests(unittest.TestCase):
         self.assertEqual(state["phase_history"][-1]["reason"], "upstream_error")
         self.assertEqual(state["phase_history"][-1]["error"], "planner connection reset")
         self.assertFalse(close_incomplete_plan_gate(state, "a later error"))
+
+    def test_cancelled_planning_closes_running_phase_and_plan_gate(self):
+        state = {"phase_results": initial_phase_results()}
+        set_phase_result(state, "plan_generation", "running", suite="development")
+        set_phase_result(state, "plan_generation", "running", suite="acceptance")
+        self.assertTrue(close_incomplete_planning_phases(state, "controller interrupted"))
+        close_incomplete_plan_gate(state, "controller interrupted", cause="cancelled")
+        self.assertEqual(state["phase_results"]["plan_generation"]["status"], "error")
+        self.assertEqual(state["phase_results"]["plan_generation"]["suites"],
+                         {"development": "error", "acceptance": "error"})
+        self.assertEqual(state["phase_results"]["plan_gate"]["status"], "not_passed")
 
     def test_accepted_plan_persists_full_controls_and_independent_review(self):
         plan = _minimal_plan()

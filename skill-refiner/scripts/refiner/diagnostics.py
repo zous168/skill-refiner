@@ -40,7 +40,7 @@ def inspect_config(path):
                 env["NO_OPEN_BROWSER"] = "1"
                 auth = {"cursor": [binary, "status"], "claude_code": [binary, "auth", "status"]}.get(backend, [binary, "login", "status"])
                 code, stdout, stderr, _ = run_process(auth, timeout=20, env=env)
-                text = (stdout + stderr).lower()
+                text = ((stdout or "") + (stderr or "")).lower()
                 if code or "not logged in" in text or '\"loggedin\": false' in text:
                     raise RuntimeError("Backend is not authenticated")
                 row["authenticated"] = True

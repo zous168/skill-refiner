@@ -42,10 +42,13 @@ the same checkpoint through `create --plan-only` and resumes with `create --resu
 `work-plan.md` is the frozen, human-readable design and test checklist. Execution
 state belongs in `state.json`, `stages.json` and immutable stage evidence. The CLI
 emits structured JSON stage/phase/evaluation events, controller Agent stream events,
-and periodic heartbeats. Controller Agent calls are not killed when the run-wide
-wall-clock budget expires: they continue until their terminal result or explicit
-cancellation. The run budget is checked before the next budgeted stage. Per-case
-executor timeouts and round/evaluation limits still bound target testing. When
+and periodic heartbeats. Each controller call is bounded by the remaining run-wide
+wall-clock budget and, when configured, the smaller role-profile timeout. CLI process
+timeouts terminate the process tree; OpenAI-compatible requests use a killable worker
+so slow-drip HTTP responses are also bounded. Timeout/cancellation evidence is saved
+and the phase becomes an error rather than a pass. Completed stages remain reusable;
+resume retries only incomplete work under the validated run contract. Per-case executor
+timeouts and round/evaluation limits also bound target testing. When
 `large-task-tracking` owns the task, its parent snapshot/runtime is the sole user-visible
 progress record; it reads these internal files and events without copying long logs.
 Final verification remains bound to stage artifacts and hashes.

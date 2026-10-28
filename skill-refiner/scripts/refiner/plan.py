@@ -88,7 +88,8 @@ def _source_overview(source):
         folder = root / base
         if folder.is_dir():
             files.extend(p.relative_to(root).as_posix() for p in sorted(folder.rglob("*"))
-                         if p.is_file() and "__pycache__" not in p.parts and ".pyc" not in p.suffixes)
+                         if p.is_file() and "__pycache__" not in p.parts
+                         and ".pyc" not in p.suffixes and ".before-" not in p.name)
     return description, [("section", item) for item in headings] + [("file", item) for item in files[:80]]
 
 

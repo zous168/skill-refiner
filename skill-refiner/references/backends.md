@@ -56,6 +56,12 @@ Profiles support `backend`, `model`, optional `executable`, `timeout`, `max_turn
 It is a byte guard, not a provider-specific token count. Oversized requests are saved
 and rejected before transmission instead of being silently truncated. Set a larger
 limit only after verifying that role's actual model context window.
+For controller roles, `timeout` caps one Agent call; every call is also capped by the
+remaining run-wide wall-clock budget. If no profile timeout is set, the remaining run
+budget still bounds the call. OpenAI-compatible HTTP calls run in a killable worker,
+so a response that keeps sending bytes cannot extend the deadline. A timeout is an
+execution error with saved evidence, not a pass; resume only through the same validated
+run workspace. The CLI `--timeout` continues to set the per-case executor limit.
 Codex supports `reasoning_effort`; native delegation additionally supports
 `child_model` via Codex's default-subagent-model setting. Model access and that
 setting depend on the installed CLI/account; verify the resulting child records.

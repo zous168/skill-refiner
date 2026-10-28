@@ -66,7 +66,7 @@ def files(root):
     root = Path(root)
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root)
-        if any(part in IGNORED for part in rel.parts):
+        if any(part in IGNORED or ".before-" in part for part in rel.parts):
             continue
         if p.is_symlink():
             raise RefinerError(f"Symlink requires explicit materialization first: {p}")

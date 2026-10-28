@@ -92,6 +92,25 @@ def close_incomplete_plan_gate(state, reason, *, cause="upstream_error"):
     return True
 
 
+def close_incomplete_planning_phases(state, reason, *, cause="cancelled"):
+    """Close any active plan phase when a controller call is cancelled."""
+    phases = state.get("phase_results", {})
+    changed = False
+    for name in ("plan_generation", "plan_self_check", "independent_review"):
+        entry = phases.get(name, {})
+        running_suites = [suite for suite, status in entry.get("suites", {}).items()
+                          if status == "running"]
+        if running_suites:
+            for suite in running_suites:
+                set_phase_result(state, name, "error", suite=suite,
+                                 cancellation=str(reason), cause=cause)
+                changed = True
+        elif entry.get("status") == "running":
+            set_phase_result(state, name, "error", cancellation=str(reason), cause=cause)
+            changed = True
+    return changed
+
+
 def require_plan_gate(state):
     phases = state.get("phase_results", {})
     for name in ("plan_generation", "plan_self_check", "independent_review"):
@@ -1596,6 +1615,7 @@ def run(args):
         return state
     except Cancelled as exc:
         event("cancelled", error=str(exc))
+        close_incomplete_planning_phases(state, str(exc))
         close_incomplete_plan_gate(state, str(exc), cause="cancelled")
         if state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "running":
             set_phase_result(state, "skill_evaluation", "error", cancellation=str(exc))

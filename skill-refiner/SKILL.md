@@ -172,10 +172,15 @@ for refinement or 30 minutes for creation, and 40/80 case-executor evaluations
 respectively. Hard limits are three repair rounds, 60 minutes, 128 agent calls, 200
 case-executor evaluations, four plan attempts, and 30 cases in either suite. These
 budgets cover the full run; creation does not reset them for nested refinement. The
-wall-clock budget is checked between completed controller Agent calls; never kill an
-active controller call because its timer expired. Stream available Agent events and
-wait for its terminal result, then save evidence and stop before starting another
-budgeted stage if needed. Case-executor timeout remains a per-evaluation failure limit.
+wall-clock budget also bounds an active controller Agent call. Each call receives the
+remaining run time, capped further by its role profile's optional timeout. CLI
+timeouts terminate the process tree, and OpenAI-compatible HTTP requests run in a
+killable worker so slow-drip responses cannot outlast the deadline. Record a timeout as
+an execution error, close the phase and plan gate with a terminal status, and never treat
+it as a pass. Do not start a new stage after the run budget expires or extend it
+automatically. On resume, reuse completed evidence and retry only incomplete work under
+the validated contract.
+Case-executor timeout remains a separate per-evaluation failure limit.
 
 After it exits, invoke the `verify` command on that run directory. Only a successful machine-readable
 `status=verified` permits you to describe the candidate as complete. A failed or

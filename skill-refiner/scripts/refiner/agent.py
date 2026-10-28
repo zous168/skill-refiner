@@ -9,7 +9,7 @@ import time
 
 import jsonschema
 
-from .common import RefinerError, read_json, run_process, write_json
+from .common import Cancelled, RefinerError, read_json, run_process, write_json
 
 
 class Agent:
@@ -38,6 +38,20 @@ class Agent:
                     if prefix.isdigit():
                         numbers.append(int(prefix))
         return max(numbers, default=0)
+
+    def _call_timeout(self, profile):
+        """Bound a role call by the remaining run budget and any profile cap."""
+        limits = []
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise RefinerError("Run wall-clock budget exhausted before starting the Agent call")
+            limits.append(remaining)
+        elif self.timeout is not None:
+            limits.append(self.timeout)
+        if profile.get("timeout") is not None:
+            limits.append(profile["timeout"])
+        return min(limits) if limits else None
 
     def _cached_response(self, role, serialized, schema):
         root = self.work / "agent-calls"
@@ -160,10 +174,8 @@ class Agent:
             raw = cached["raw"]
             print(json.dumps({"stage": role, "cache_hit": True, "response_rejected": True}), flush=True)
         else:
-            # The run-wide wall clock is a soft boundary between completed role
-            # calls. Never terminate a controller Agent that is still producing
-            # output; round/call/evaluation budgets are checked after its result.
-            remaining = None
+            # The run-wide wall clock also bounds this individual call. Completed
+            # work remains resumable; a timed-out call is recorded as an error.
             self.calls += 1
             print(json.dumps({"stage": role, "agent_call": self.calls}), flush=True)
             call_dir = self.work / "agent-calls" / f"{self.calls:03}-{role}"
@@ -201,37 +213,57 @@ class Agent:
                                    f"role's max_request_bytes to a verified backend limit.")
             request_manifest["status"] = "submitted"
             write_json(call_dir / "request-manifest.json", request_manifest)
-            if command:
-                stdin = serialized
-                result_file = None
-                argv = command
-            else:
-                from .runtime import execute
-                call_started = time.monotonic()
-                result = execute(profile, prompt, cwd, None, planning=True,
-                                 progress_label=role,
-                                 response_schema=wire_schema if profile["backend"] in {"codex", "codex_subagent"} else None)
-                raw = result["final_message"]
-                write_json(call_dir / "backend-result.json", result)
-                (call_dir / "response.txt").write_text(raw, encoding="utf-8")
-                code, stdout, stderr, seconds, result_file = 0, raw, "", round(time.monotonic() - call_started, 3), None
-            if command:
-                def heartbeat(elapsed, remaining):
-                    event = {"stage": "agent_call", "status": "still_running", "role": role,
-                             "elapsed_seconds": elapsed}
-                    if remaining is not None:
-                        event["remaining_timeout_seconds"] = remaining
-                    print(json.dumps(event, ensure_ascii=False), flush=True)
-                code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=stdin,
-                                                           timeout=None, log=call_dir / "process.log",
-                                                           on_progress=heartbeat, on_output=lambda stream, chunk:
-                                                           print(json.dumps({"stage": "agent_stream", "role": role,
-                                                                             "stream": stream,
-                                                                             "text": chunk[:4000]},
-                                                                            ensure_ascii=False), flush=True),
-                                                           progress_interval=30)
-            write_json(call_dir / "execution.json", {"exit_code": code, "seconds": seconds,
-                       "backend": "command" if command else profile["backend"], "model": profile.get("model", "local-default"), "role": role})
+            call_started = time.monotonic()
+            call_timeout = self._call_timeout(profile)
+            backend_name = "command" if command else profile["backend"]
+            try:
+                if command:
+                    stdin = serialized
+                    result_file = None
+                    argv = command
+
+                    def heartbeat(elapsed, remaining):
+                        event = {"stage": "agent_call", "status": "still_running", "role": role,
+                                 "elapsed_seconds": elapsed}
+                        if remaining is not None:
+                            event["remaining_timeout_seconds"] = remaining
+                        print(json.dumps(event, ensure_ascii=False), flush=True)
+
+                    code, stdout, stderr, seconds = run_process(
+                        argv, cwd=cwd, input_text=stdin, timeout=call_timeout,
+                        log=call_dir / "process.log", on_progress=heartbeat,
+                        on_output=lambda stream, chunk: print(json.dumps(
+                            {"stage": "agent_stream", "role": role, "stream": stream,
+                             "text": chunk[:4000]}, ensure_ascii=False), flush=True),
+                        progress_interval=30)
+                else:
+                    from .runtime import execute
+                    result = execute(
+                        profile, prompt, cwd, call_timeout, planning=True,
+                        progress_label=role,
+                        response_schema=wire_schema if profile["backend"] in {"codex", "codex_subagent"} else None,
+                        log_path=call_dir / "process.log")
+                    raw = result["final_message"]
+                    write_json(call_dir / "backend-result.json", result)
+                    (call_dir / "response.txt").write_text(raw, encoding="utf-8")
+                    code, stdout, stderr, seconds, result_file = 0, raw, "", round(time.monotonic() - call_started, 3), None
+            except Exception as exc:
+                status = "cancelled" if isinstance(exc, Cancelled) else "execution_error"
+                request_manifest.update(status=status, error=str(exc)[:2000])
+                write_json(call_dir / "request-manifest.json", request_manifest)
+                write_json(call_dir / "execution.json", {
+                    "status": status, "exit_code": None,
+                    "seconds": round(time.monotonic() - call_started, 3),
+                    "timeout_seconds": call_timeout, "backend": backend_name,
+                    "model": profile.get("model", "local-default"), "role": role,
+                    "error_type": type(exc).__name__, "error": str(exc)[:2000],
+                })
+                raise
+            write_json(call_dir / "execution.json", {
+                "status": "completed" if code == 0 else "execution_error",
+                "exit_code": code, "seconds": seconds, "timeout_seconds": call_timeout,
+                "backend": backend_name, "model": profile.get("model", "local-default"), "role": role,
+            })
             if code:
                 request_manifest["status"] = "execution_error"
                 request_manifest["exit_code"] = code

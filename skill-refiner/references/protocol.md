@@ -63,7 +63,8 @@ they must not be represented as live LLM evidence.
 
 # Output checks
 
-Response checks: `contains`, `not_contains`, `regex`, `text_equal`, `json_equal`,
+Response checks: `contains`, `contains_any` (array of alternative phrases),
+`not_contains`, `not_contains_any` (array of phrases all forbidden), `regex`, `text_equal`, `json_equal`,
 `json_sequence_equal` (array of expected values against an unwrapped JSON stream),
 `json_path_equal` (RFC6901 `pointer`), `json_path_regex` (regex against the decoded string at
 `pointer`), and `json_path_matches_file` (response `pointer`,
