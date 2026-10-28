@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import difflib
 import json
@@ -7,6 +8,7 @@ import hashlib
 import copy
 import re
 from pathlib import Path
+import threading
 import time
 
 from .agent import Agent
@@ -373,7 +375,7 @@ def validate_plan_review(review, plan):
 
 
 def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
-              *, phase_callback=None, suite="development"):
+              *, phase_callback=None, suite="development", on_self_check_passed=None):
     feedback = []
     previous_plan = None
     def phase(name, status, **detail):
@@ -495,6 +497,8 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
         phase("plan_self_check", "passed", attempt=attempt + 1,
               controls=len(control_results.get("case_control_results", [])))
         phase("independent_review", "running", attempt=attempt + 1)
+        if on_self_check_passed:
+            on_self_check_passed(plan)
         try:
             review = agent.ask("plan-review", "Independently review the test plan against requirements and "
                            "the source Skill. Reject superficial assertions, circular implementation-derived "
@@ -621,6 +625,64 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
         feedback.extend(review["issues"])
         previous_plan = current_plan
     raise RefinerError("Unable to construct a valid plan")
+
+
+def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_attempts=2,
+                     phase_callback=None, agent_parallelism=2, wave_callback=None):
+    """Plan development and acceptance; overlap only after requirements are frozen."""
+    def make_acceptance(plan):
+        return make_plan(agent, {**context, "contract": plan["requirements"]}, work,
+                         acceptance_cases, "acceptance-plan", max_attempts,
+                         phase_callback=phase_callback, suite="acceptance")
+
+    if agent_parallelism not in {1, 2}:
+        raise RefinerError("The safe planning wave supports agent_parallelism 1 or 2")
+    if agent_parallelism == 1:
+        if wave_callback:
+            wave_callback("serial", reason="agent_parallelism=1")
+        plan = make_plan(agent, context, work, max_cases, max_attempts=max_attempts,
+                         phase_callback=phase_callback, suite="development")
+        return plan, make_acceptance(plan)
+    acceptance_future = None
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="skill-refiner-plan") as pool:
+        def start_acceptance(plan):
+            nonlocal acceptance_future
+            if acceptance_future is not None:
+                return
+            if wave_callback:
+                wave_callback("running", tasks=["development independent review", "acceptance plan generation, self-check and review"],
+                              dependency="development plan passed complete local controls; requirement contract is frozen")
+            acceptance_future = pool.submit(make_acceptance, plan)
+
+        try:
+            plan = make_plan(agent, context, work, max_cases, max_attempts=max_attempts,
+                             phase_callback=phase_callback, suite="development",
+                             on_self_check_passed=start_acceptance)
+        except Exception as exc:
+            peer_error = None
+            if acceptance_future is not None:
+                try:
+                    acceptance_future.result()
+                except Exception as other:
+                    peer_error = other
+            if wave_callback and acceptance_future is not None:
+                wave_callback("failed", error=str(peer_error or exc),
+                              development_error=str(exc), acceptance_error=str(peer_error) if peer_error else None)
+            if peer_error and not isinstance(exc, Cancelled):
+                raise PlanGateError(f"Development planning failed: {exc}; concurrent acceptance planning also failed: {peer_error}") from exc
+            raise
+        if acceptance_future is None:
+            acceptance = make_acceptance(plan)
+        else:
+            try:
+                acceptance = acceptance_future.result()
+            except Exception as exc:
+                if wave_callback:
+                    wave_callback("failed", error=str(exc), development_status="passed", acceptance_status="failed")
+                raise
+    if wave_callback and agent_parallelism == 2:
+        wave_callback("passed", development_status="passed", acceptance_status="passed")
+    return plan, acceptance
 
 
 def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback, suite):
@@ -972,12 +1034,14 @@ def run(args):
     else:
         write_json(work / "state.json", state)
     state.setdefault("phase_results", initial_phase_results())
+    state["agent_parallelism"] = getattr(args, "agent_parallelism", 2)
     agent = Agent(work, args.agent_command, args.timeout, config=config)
     agent.max_calls = args.max_agent_calls
     engine_config = read_json(args.engine_config) if args.engine_config else None
     execution = {"backend_config": config, "agent_command": args.agent_command, "engine": args.engine,
                  "engine_config": engine_config, "skill_up": args.skill_up, "timeout": args.timeout,
-                 "parallelism": args.parallelism}
+                 "parallelism": args.parallelism,
+                 "agent_parallelism": getattr(args, "agent_parallelism", 2)}
     options = {"max_rounds": args.max_rounds, "planning_attempts": getattr(args, "planning_attempts", 2),
                "max_cases": args.max_cases, "acceptance_cases": args.acceptance_cases}
     limits = {"max_seconds": args.max_seconds, "max_agent_calls": args.max_agent_calls,
@@ -1164,13 +1228,34 @@ def run(args):
         print(json.dumps({"status": status, "elapsed_seconds": state["elapsed_seconds"],
                           "max_seconds": args.max_seconds, **data}, ensure_ascii=False), flush=True)
 
+    phase_lock = threading.RLock()
+
     def phase_progress(name, status, **data):
         suite = data.pop("suite", None)
-        set_phase_result(state, name, status, suite=suite, **data)
-        state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
-        write_json(work / "state.json", state)
-        print(json.dumps({"stage": "phase", "phase": name, "status": status,
-                          "suite": suite, **data}, ensure_ascii=False), flush=True)
+        with phase_lock:
+            set_phase_result(state, name, status, suite=suite, **data)
+            state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+            write_json(work / "state.json", state)
+            print(json.dumps({"stage": "phase", "phase": name, "status": status,
+                              "suite": suite, **data}, ensure_ascii=False), flush=True)
+
+    def planning_wave_progress(status, **data):
+        with phase_lock:
+            waves = state.setdefault("planning_waves", [])
+            if status == "running":
+                record = {"sequence": len(waves) + 1, "status": "running",
+                          "started_at": datetime.now(timezone.utc).isoformat(), **data}
+                waves.append(record)
+            elif status == "serial":
+                waves.append({"sequence": len(waves) + 1, "status": "serial", **data})
+            else:
+                record = next((item for item in reversed(waves) if item.get("status") == "running"), None)
+                if record:
+                    record.update(status=status, completed_at=datetime.now(timezone.utc).isoformat(), **data)
+            state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+            write_json(work / "state.json", state)
+            print(json.dumps({"stage": "planning_wave", "status": status, **data},
+                             ensure_ascii=False), flush=True)
 
     def budget():
         if elapsed_before + time.monotonic() - started > args.max_seconds or agent.calls > args.max_agent_calls:
@@ -1294,14 +1379,13 @@ def run(args):
                 _review_frozen_plan(agent, frozen, suite_context, controls,
                                     phase_callback=phase_progress, suite=suite)
         else:
-            plan = make_plan(agent, context, work, args.max_cases,
-                             max_attempts=getattr(args, 'planning_attempts', 2),
-                             phase_callback=phase_progress, suite="development")
+            plan, acceptance = make_plan_suites(
+                agent, context, work, args.max_cases, args.acceptance_cases,
+                max_attempts=getattr(args, 'planning_attempts', 2),
+                phase_callback=phase_progress,
+                agent_parallelism=getattr(args, "agent_parallelism", 2),
+                wave_callback=planning_wave_progress)
             budget()
-            acceptance = make_plan(agent, {**context, "contract": plan["requirements"]}, work,
-                                   args.acceptance_cases, "acceptance-plan",
-                                   max_attempts=getattr(args, 'planning_attempts', 2),
-                                   phase_callback=phase_progress, suite="acceptance")
         if not frozen_plan:
             write_json(work / "test-plan.json", plan)
             write_json(work / "acceptance-plan.json", acceptance)
@@ -1325,7 +1409,8 @@ def run(args):
         phase_progress("plan_gate", "passed", development_cases=len(plan["cases"]),
                        acceptance_cases=len(acceptance["cases"]), oracle_lock_sha256=locked)
         state["plan_ready"] = True
-        write_work_plan(work, source=source, plan=plan, acceptance=acceptance, limits=limits)
+        write_work_plan(work, source=source, plan=plan, acceptance=acceptance, limits=limits,
+                        agent_parallelism=getattr(args, "agent_parallelism", 2))
         write_test_scenarios(work, plan=plan, acceptance=acceptance)
         event("plan_ready", work_plan=str(work / "work-plan.md"),
               requirements=len(plan["requirements"]), development_cases=len(plan["cases"]),

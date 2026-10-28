@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
@@ -27,7 +28,8 @@ from refiner.creation import ANALYSIS, analysis_markdown, validate_analysis  # n
 from refiner.plan import _source_overview, write_test_scenarios, write_work_plan  # noqa: E402
 from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate,
                               close_incomplete_planning_phases, initial_phase_results, make_plan,
-                               require_plan_gate, set_phase_result, validate_plan_review)  # noqa: E402
+                              make_plan_suites, require_plan_gate, set_phase_result,
+                              validate_plan_review)  # noqa: E402
 from refiner.gate import (_verify_phase_history, _verify_plan_control_artifacts,
                           _verify_plan_review_artifacts)  # noqa: E402
 from refiner.runtime import api_request, codex_output_schema, cursor_command, decode_codex_response  # noqa: E402
@@ -190,6 +192,109 @@ class OpenAICompatibleRequestTimeoutTests(unittest.TestCase):
             self.assertLess(elapsed, 3.5, f"the request exceeded its two-second hard deadline: {elapsed:.2f}s")
         finally:
             self._close_server(server, server_thread)
+
+
+class AgentPlanningConcurrencyTests(unittest.TestCase):
+    def test_independent_plan_review_overlaps_acceptance_planning_after_contract_freeze(self):
+        development = _minimal_plan()
+        acceptance = _minimal_plan()
+        acceptance["requirements"] = json.loads(json.dumps(development["requirements"]))
+        active, peak = 0, 0
+        guard = threading.Lock()
+        rendezvous = threading.Barrier(2)
+        wave_events = []
+
+        def fake_make_plan(_agent, context, _work, _max_cases, role="plan", _max_attempts=2, **kwargs):
+            nonlocal active, peak
+            if role == "plan":
+                plan = development
+                kwargs["on_self_check_passed"](plan)
+            else:
+                self.assertEqual(context["contract"], development["requirements"])
+                plan = acceptance
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            rendezvous.wait(timeout=3)
+            with guard:
+                active -= 1
+            return plan
+
+        with tempfile.TemporaryDirectory() as root, patch("refiner.pipeline.make_plan", side_effect=fake_make_plan):
+            planned, accepted = make_plan_suites(
+                object(), {"requirements": [{"source": "frozen.md", "content": "R1"}]}, root,
+                4, 2, agent_parallelism=2,
+                wave_callback=lambda status, **data: wave_events.append((status, data)))
+        self.assertIs(planned, development)
+        self.assertIs(accepted, acceptance)
+        self.assertEqual(peak, 2, "both independent Agent branches must overlap")
+        self.assertEqual([status for status, _ in wave_events], ["running", "passed"])
+
+    def test_agent_parallelism_one_runs_plan_branches_sequentially(self):
+        calls = []
+
+        def fake_make_plan(_agent, context, _work, _max_cases, role="plan", _max_attempts=2, **_kwargs):
+            calls.append(role)
+            plan = _minimal_plan()
+            if role == "acceptance-plan":
+                self.assertEqual(context["contract"], plan["requirements"])
+            return plan
+
+        waves = []
+        with tempfile.TemporaryDirectory() as root, patch("refiner.pipeline.make_plan", side_effect=fake_make_plan):
+            make_plan_suites(object(), {}, root, 4, 2, agent_parallelism=1,
+                             wave_callback=lambda status, **data: waves.append((status, data)))
+        self.assertEqual(calls, ["plan", "acceptance-plan"])
+        self.assertEqual(waves[0][0], "serial")
+
+    def test_unsupported_agent_parallelism_is_rejected(self):
+        for parallelism in (0, 3):
+            with self.subTest(parallelism=parallelism):
+                with self.assertRaisesRegex(RefinerError, "supports agent_parallelism 1 or 2"):
+                    make_plan_suites(object(), {}, ".", 4, 2,
+                                     agent_parallelism=parallelism)
+
+    def test_parallel_plan_failure_joins_the_started_peer_and_records_failed_wave(self):
+        peer_finished = threading.Event()
+        waves = []
+
+        def fake_make_plan(_agent, _context, _work, _max_cases, role="plan", _max_attempts=2, **kwargs):
+            if role == "plan":
+                kwargs["on_self_check_passed"](_minimal_plan())
+                raise PlanGateError("development review rejected the plan")
+            peer_finished.set()
+            return _minimal_plan()
+
+        with tempfile.TemporaryDirectory() as root, patch("refiner.pipeline.make_plan", side_effect=fake_make_plan):
+            with self.assertRaisesRegex(PlanGateError, "development review rejected"):
+                make_plan_suites(object(), {}, root, 4, 2, agent_parallelism=2,
+                                 wave_callback=lambda status, **data: waves.append((status, data)))
+        self.assertTrue(peer_finished.is_set(), "the already-started acceptance branch must be joined")
+        self.assertEqual([status for status, _ in waves], ["running", "failed"])
+
+    def test_agent_call_counter_and_artifacts_are_safe_under_parallel_requests(self):
+        barrier = threading.Barrier(2)
+        config = {"agents": {"default": {"backend": "openai_compatible", "model": "local-test",
+                                          "base_url": "http://127.0.0.1:1"}}}
+        schema = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
+
+        def backend(*_args, **_kwargs):
+            barrier.wait(timeout=3)
+            return {"final_message": json.dumps({"ok": True})}
+
+        with tempfile.TemporaryDirectory() as root:
+            agent = RefinerAgent(root, config=config, timeout=10)
+            agent.max_calls = 2
+            with patch("refiner.runtime.execute", side_effect=backend):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(agent.ask, role, "Return JSON.", {}, schema)
+                               for role in ("plan", "acceptance-plan")]
+                    self.assertEqual([future.result(timeout=5) for future in futures],
+                                     [{"ok": True}, {"ok": True}])
+            call_dirs = list((Path(root) / "agent-calls").iterdir())
+            self.assertEqual(agent.calls, 2)
+            self.assertEqual(len(call_dirs), 2)
+            self.assertEqual({path.name.split("-", 1)[0] for path in call_dirs}, {"001", "002"})
 
 
 class StageArtifactCollectionTests(unittest.TestCase):
@@ -519,19 +624,24 @@ class PlanRevisionAndPhaseGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             agent = Agent(root)
             phases = []
+            frozen_for_acceptance = []
             accepted = make_plan(agent, {}, root, 8, max_attempts=1,
                                  phase_callback=lambda name, status, **detail:
-                                 phases.append((name, status, detail.get("suite"))))
+                                 phases.append((name, status, detail.get("suite"))),
+                                 on_self_check_passed=frozen_for_acceptance.append)
             self.assertEqual(accepted, plan)
             controls = read_json(Path(root) / "plan-controls" / "development.json")
             review = read_json(Path(root) / "plan-reviews" / "development.json")
             attempt = read_json(Path(root) / "plan-controls" / "attempts" / "development-01.json")
         self.assertEqual(agent.roles, ["plan", "plan-review"])
+        self.assertEqual(frozen_for_acceptance, [plan])
         self.assertEqual(controls["plan_sha256"], attempt["plan_sha256"])
         self.assertEqual(controls["case_control_results"], attempt["case_control_results"])
         self.assertEqual(review["review"]["approved"], True)
         self.assertIn(("plan_self_check", "passed", "development"), phases)
         self.assertIn(("independent_review", "passed", "development"), phases)
+        self.assertLess(phases.index(("plan_self_check", "passed", "development")),
+                        phases.index(("independent_review", "running", "development")))
 
     def test_plan_revision_cannot_drop_an_unrelated_case(self):
         first = _minimal_plan()
@@ -664,6 +774,9 @@ class PlanMarkdownRenderingTests(unittest.TestCase):
             write_test_scenarios(work, plan=dev_plan, acceptance=acceptance)
             work_plan = (work / "work-plan.md").read_text(encoding="utf-8")
             scenarios = (work / "test-scenarios.md").read_text(encoding="utf-8")
+            write_work_plan(work, plan=dev_plan, acceptance=acceptance, analysis=None,
+                            agent_parallelism=1)
+            serial_work_plan = (work / "work-plan.md").read_text(encoding="utf-8")
         self.assertIn("dev-spec.md#R1", work_plan)
         self.assertIn("acceptance-spec.md#A1", work_plan)
         self.assertIn("Scenario: Operator starts a valid task.", work_plan)
@@ -680,6 +793,10 @@ class PlanMarkdownRenderingTests(unittest.TestCase):
         self.assertIn("Step 8 — Verify and deliver", work_plan)
         self.assertIn("showing this plan is a visibility checkpoint, not an approval wait", work_plan)
         self.assertIn("exhausted configured budget", work_plan)
+        self.assertIn("Bounded Agent concurrency", work_plan)
+        self.assertIn("development plan's independent review overlaps with acceptance-plan generation", work_plan)
+        self.assertIn("Cases within one skill-up executor remain sequential", work_plan)
+        self.assertIn("Controller Agent planning runs sequentially", serial_work_plan)
 
 
 class CreationAnalysisConclusionTests(unittest.TestCase):

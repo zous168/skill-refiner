@@ -62,6 +62,12 @@ budget still bounds the call. OpenAI-compatible HTTP calls run in a killable wor
 so a response that keeps sending bytes cannot extend the deadline. A timeout is an
 execution error with saved evidence, not a pass; resume only through the same validated
 run workspace. The CLI `--timeout` continues to set the per-case executor limit.
+`--agent-parallelism` is separate from executor `--parallelism` and accepts 1 or 2.
+At 2, development-plan independent review overlaps with acceptance-plan generation only
+after the development plan passes full local controls and freezes its requirement
+contract. Both branches have separate call evidence and must join successfully before
+the plan gate. At 1 they run sequentially. Cases in the same skill-up executor remain
+serial because of the shared judge-directory collision described below.
 Codex supports `reasoning_effort`; native delegation additionally supports
 `child_model` via Codex's default-subagent-model setting. Model access and that
 setting depend on the installed CLI/account; verify the resulting child records.

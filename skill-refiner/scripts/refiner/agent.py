@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import shlex
 import shutil
+import threading
 import time
 
 import jsonschema
@@ -25,6 +26,7 @@ class Agent:
         self.config = config
         self.calls = self._existing_call_count()
         self.cached_calls = 0
+        self._call_lock = threading.Lock()
         self.max_calls = None
         self.deadline = None
 
@@ -163,22 +165,26 @@ class Agent:
         serialized = json.dumps(request, ensure_ascii=False)
         cached = self._cached_response(role, serialized, schema)
         if cached and cached["status"] == "completed":
-            self.cached_calls += 1
+            with self._call_lock:
+                self.cached_calls += 1
             print(json.dumps({"stage": role, "cache_hit": True}), flush=True)
             return cached["response"]
-        if self.max_calls is not None and self.calls >= self.max_calls and not cached:
-            raise RefinerError("Agent-call budget exhausted")
         if cached:
-            self.cached_calls += 1
+            with self._call_lock:
+                self.cached_calls += 1
             call_dir = None
             raw = cached["raw"]
             print(json.dumps({"stage": role, "cache_hit": True, "response_rejected": True}), flush=True)
         else:
             # The run-wide wall clock also bounds this individual call. Completed
             # work remains resumable; a timed-out call is recorded as an error.
-            self.calls += 1
-            print(json.dumps({"stage": role, "agent_call": self.calls}), flush=True)
-            call_dir = self.work / "agent-calls" / f"{self.calls:03}-{role}"
+            with self._call_lock:
+                if self.max_calls is not None and self.calls >= self.max_calls:
+                    raise RefinerError("Agent-call budget exhausted")
+                self.calls += 1
+                call_number = self.calls
+            print(json.dumps({"stage": role, "agent_call": call_number}), flush=True)
+            call_dir = self.work / "agent-calls" / f"{call_number:03}-{role}"
             call_dir.mkdir(parents=True)
             write_json(call_dir / "request.json", request)
         # Empty cwd prevents opportunistic reads of other stages and test oracles.

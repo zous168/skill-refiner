@@ -273,7 +273,8 @@ def run(args):
     engine_config = read_json(args.engine_config) if args.engine_config else None
     execution = {"backend_config": config, "agent_command": args.agent_command, "engine": args.engine,
                  "engine_config": engine_config, "skill_up": args.skill_up, "timeout": args.timeout,
-                 "parallelism": args.parallelism}
+                 "parallelism": args.parallelism,
+                 "agent_parallelism": getattr(args, "agent_parallelism", 2)}
     options = {"max_rounds": args.max_rounds, "planning_attempts": args.planning_attempts,
                "max_cases": args.max_cases, "acceptance_cases": args.acceptance_cases}
     limits = {"max_seconds": args.max_seconds, "max_agent_calls": args.max_agent_calls,
@@ -281,6 +282,7 @@ def run(args):
               "planning_attempts": args.planning_attempts, "max_cases": args.max_cases,
               "acceptance_cases": args.acceptance_cases}
     state["limits"] = limits
+    state["agent_parallelism"] = getattr(args, "agent_parallelism", 2)
     state.setdefault("evaluation_history", [])
     controller_root = Path(__file__).resolve().parent.parent
     controller_sha256 = digest({path.relative_to(controller_root).as_posix():
@@ -484,7 +486,8 @@ def run(args):
             break
         write_json(work / 'analysis.json', analysis)
         (work / 'business-analysis.md').write_text(analysis_markdown(analysis), encoding="utf-8")
-        write_work_plan(work, analysis=analysis, limits=limits)
+        write_work_plan(work, analysis=analysis, limits=limits,
+                        agent_parallelism=getattr(args, "agent_parallelism", 2))
         locked = digest({'inputs': inputs, 'analysis': analysis})
         write_json(work / 'business.lock.json', {'sha256': locked, 'input_sha256': input_hash})
         integrity()
@@ -571,7 +574,8 @@ def run(args):
         state['evaluation_history'] = refinement.get('evaluation_history', state.get('evaluation_history', []))
         state['refinement_rounds'] = refinement.get('rounds', [])
         state['target_evaluations'] = refinement.get('target_evaluations', 0)
-        write_work_plan(work, source=draft_root, analysis=analysis, limits=limits)
+        write_work_plan(work, source=draft_root, analysis=analysis, limits=limits,
+                        agent_parallelism=getattr(args, "agent_parallelism", 2))
         if refinement['status'] == 'planned':
             state['refinement_workspace'] = str(child.output)
             state['plan_ready'] = True

@@ -181,6 +181,11 @@ it as a pass. Do not start a new stage after the run budget expires or extend it
 automatically. On resume, reuse completed evidence and retry only incomplete work under
 the validated contract.
 Case-executor timeout remains a separate per-evaluation failure limit.
+Controller planning defaults to at most two concurrent Agent calls in one verified
+wave: development-plan review overlaps acceptance-plan generation after the requirement
+contract passes local controls. Set `--agent-parallelism 1` to serialize that wave.
+Both branches must finish and pass before the plan gate; same-executor skill-up cases
+remain serialized because their judge uses shared temporary directories.
 
 After it exits, invoke the `verify` command on that run directory. Only a successful machine-readable
 `status=verified` permits you to describe the candidate as complete. A failed or

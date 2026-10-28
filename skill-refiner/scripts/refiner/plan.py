@@ -201,10 +201,23 @@ def _execution_phases(analysis):
     return phases
 
 
-def _execution_phase_markdown(analysis):
+def _execution_phase_markdown(analysis, agent_parallelism=2):
     lines = [
         "## Execution phases and step conclusions", "",
         "This is the ordered execution map. Each step must end with its stated conclusion and evidence before dependent work advances.", "",
+        "### Bounded Agent concurrency", "",
+    ]
+    if agent_parallelism == 2:
+        lines += [
+            "After the development plan passes its complete local controls and freezes the requirement contract, the development plan's independent review overlaps with acceptance-plan generation, self-check and review. Both branches must finish successfully before the plan gate can pass.",
+            "Each branch has its own call artifacts and status. A failure in either branch is recorded, all started work is joined, and the plan gate remains closed.",
+        ]
+    else:
+        lines += [
+            "Controller Agent planning runs sequentially because --agent-parallelism is 1. The same dependency order and plan gate apply.",
+        ]
+    lines += [
+        "Cases within one skill-up executor remain sequential because the pinned judge uses shared temporary directories; no case-level parallelism is enabled by this Agent setting.", "",
         "### Autonomous progression", "",
         "Unless the user explicitly asks for plan-only, showing this plan is a visibility checkpoint, not an approval wait. Continue the same run through implementation, tests, repair and verification. Pause only for a material unanswered business decision, a required permission or local action, an explicit user stop, a failed gate, an environment blocker, or an exhausted configured budget.", "",
         "At each meaningful transition, report the step number and name, live status, one-sentence conclusion, evidence path and next step. Read live status from structured events, state.json and stages.json; never infer completion from a static plan, elapsed time or heartbeat count.", "",
@@ -226,7 +239,8 @@ def _execution_phase_markdown(analysis):
     return lines
 
 
-def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=None, limits=None):
+def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=None, limits=None,
+                    agent_parallelism=2):
     """Write the visible, frozen design and test checklist before test execution."""
     work = Path(work)
     if plan is None and (work / "test-plan.json").is_file():
@@ -282,7 +296,7 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
         lines += ["", "## Assumptions", ""] + [f"- {_md(x)}" for x in analysis["assumptions"]]
     if analysis and analysis.get("external_dependencies"):
         lines += ["", "## External dependencies", ""] + [f"- {_md(x)}" for x in analysis["external_dependencies"]]
-    lines += [""] + _execution_phase_markdown(analysis)
+    lines += [""] + _execution_phase_markdown(analysis, agent_parallelism=agent_parallelism)
     lines += ["", "## Acceptance criteria", "",
               "- Every required behavior is covered by the frozen, independently reviewed cases.",
               "- Each configured executor passes the full independent acceptance suite.",

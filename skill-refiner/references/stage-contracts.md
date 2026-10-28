@@ -48,7 +48,11 @@ timeouts terminate the process tree; OpenAI-compatible requests use a killable w
 so slow-drip HTTP responses are also bounded. Timeout/cancellation evidence is saved
 and the phase becomes an error rather than a pass. Completed stages remain reusable;
 resume retries only incomplete work under the validated run contract. Per-case executor
-timeouts and round/evaluation limits also bound target testing. When
+timeouts and round/evaluation limits also bound target testing. When the development
+plan has passed local controls, its independent review overlaps acceptance-plan
+generation under `--agent-parallelism 2`; the gate waits for both. `--agent-parallelism=1`
+selects the sequential fallback. Same-executor skill-up cases remain serialized
+because the judge uses shared temporary directories. When
 `large-task-tracking` owns the task, its parent snapshot/runtime is the sole user-visible
 progress record; it reads these internal files and events without copying long logs.
 Final verification remains bound to stage artifacts and hashes.

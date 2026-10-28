@@ -31,6 +31,8 @@ def workflow_options(parser, *, creating=False):
                         help="Repair rounds; default 2, hard cap 3")
     parser.add_argument("--planning-attempts", type=int, default=4 if creating else 2,
                         help="Bounded plan/review revisions per development or acceptance suite")
+    parser.add_argument("--agent-parallelism", type=int, choices=(1, 2), default=2,
+                        help="Concurrent controller Agents for the verified planning wave (1 disables concurrency)")
     parser.add_argument("--max-cases", type=int, default=8 if creating else 4)
     parser.add_argument("--acceptance-cases", type=int, default=6 if creating else 2)
     parser.add_argument("--parallelism", type=int, default=2)
