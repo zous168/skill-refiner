@@ -19,7 +19,7 @@ def _format_check_value(value):
 
 
 def _format_check_line(check):
-    parts = [check["type"]]
+    parts = [f"assertion={check.get('id', 'missing-id')}", check["type"]]
     for key in ("path", "pointer", "control_command", "control_tool_name"):
         if key in check:
             parts.append(f"{key}={check[key]!r}")
@@ -52,6 +52,21 @@ def _render_case_block(case, requirements):
     lines.append("  - Machine checks:")
     for check in case.get("checks", []):
         lines.append(f"    - {_md(_format_check_line(check))}")
+    audit = case.get("asset_audit", {})
+    lines += ["  - Asset audit:",
+              f"    - Status: {_md(audit.get('status', 'missing'))}",
+              f"    - Required: {_md(', '.join(audit.get('required_paths', [])) or 'none')}",
+              f"    - Available: {_md(', '.join(audit.get('available_paths', [])) or 'none')}",
+              f"    - Source refs: {_md(', '.join(audit.get('source_refs', [])) or 'none')}",
+              f"    - Basis: {_md(audit.get('basis', ''))}"]
+    lines.append("  - Positive controls:")
+    for control in case.get("positive_controls", []):
+        lines.append(f"    - {_md(control.get('id', 'missing-id'))}: {_md(control.get('response', ''))}")
+    lines.append("  - Negative controls:")
+    for control in case.get("negative_controls", []):
+        lines.append(f"    - {_md(control.get('id', 'missing-id'))} targets assertion "
+                     f"{_md(control.get('assertion_id', 'missing-id'))}: {_md(control.get('response', ''))}")
+        lines.append(f"      - Rationale: {_md(control.get('rationale', ''))}")
     lines.append(f"  - Oracle rationale: {_md(case.get('oracle_reason', ''))}")
     return lines
 
@@ -176,12 +191,26 @@ def _suite_case_markdown(phase, suite):
                 f"- {rid}: {row.get('behavior', 'unknown')} (source: {row.get('source', '')})"
             )
         check_lines = ["- " + _format_check_line(check) for check in case["checks"]]
+        audit = case.get("asset_audit", {})
+        positive = [f"- {item.get('id')}: {item.get('response', '')}"
+                    for item in case.get("positive_controls", [])]
+        negative = [f"- {item.get('id')} targets {item.get('assertion_id')}: {item.get('response', '')}; "
+                    f"rationale: {item.get('rationale', '')}"
+                    for item in case.get("negative_controls", [])]
         lines += [
             f"### {case['id']} ({case['kind']})", "",
             f"Scenario: {case.get('scenario', '')}",
             f"Expected outcome: {case.get('expected_outcome', '')}",
             "Linked requirements:", *req_lines,
             "Machine checks:", *check_lines,
+            "Asset audit:",
+            f"- Status: {audit.get('status', 'missing')}",
+            f"- Required paths: {', '.join(audit.get('required_paths', [])) or 'none'}",
+            f"- Available paths: {', '.join(audit.get('available_paths', [])) or 'none'}",
+            f"- Source refs: {', '.join(audit.get('source_refs', [])) or 'none'}",
+            f"- Basis: {audit.get('basis', '')}",
+            "Positive controls:", *positive,
+            "Negative controls:", *negative,
             f"Oracle rationale: {case['oracle_reason']}",
             "```json",
             json.dumps({"prompt": case["prompt"], "inputs": case["files"]}, ensure_ascii=False, indent=2),

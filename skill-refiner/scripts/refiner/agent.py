@@ -139,8 +139,13 @@ class Agent:
                 "development and acceptance planning and review; retain all genuine target "
                 "requirements and independent oracles."
             )
+        wire_schema = schema
+        if profile["backend"] in {"codex", "codex_subagent"}:
+            from .runtime import codex_output_schema, codex_schema_instructions
+            wire_schema = codex_output_schema(schema)
+            instruction += codex_schema_instructions(schema)
         request = {"schema_version": "skill-refiner.agent-request/v1", "role": role,
-                   "instruction": instruction, "input": payload, "response_schema": schema}
+                   "instruction": instruction, "input": payload, "response_schema": wire_schema}
         serialized = json.dumps(request, ensure_ascii=False)
         cached = self._cached_response(role, serialized, schema)
         if cached and cached["status"] == "completed":
@@ -155,9 +160,10 @@ class Agent:
             raw = cached["raw"]
             print(json.dumps({"stage": role, "cache_hit": True, "response_rejected": True}), flush=True)
         else:
-            remaining = self.deadline - time.monotonic() if self.deadline else self.timeout
-            if remaining <= 0:
-                raise RefinerError("Wall-clock budget exhausted")
+            # The run-wide wall clock is a soft boundary between completed role
+            # calls. Never terminate a controller Agent that is still producing
+            # output; round/call/evaluation budgets are checked after its result.
+            remaining = None
             self.calls += 1
             print(json.dumps({"stage": role, "agent_call": self.calls}), flush=True)
             call_dir = self.work / "agent-calls" / f"{self.calls:03}-{role}"
@@ -202,20 +208,28 @@ class Agent:
             else:
                 from .runtime import execute
                 call_started = time.monotonic()
-                result = execute(profile, prompt, cwd, min(self.timeout, remaining), planning=True,
-                                 progress_label=role)
+                result = execute(profile, prompt, cwd, None, planning=True,
+                                 progress_label=role,
+                                 response_schema=wire_schema if profile["backend"] in {"codex", "codex_subagent"} else None)
                 raw = result["final_message"]
                 write_json(call_dir / "backend-result.json", result)
-                (call_dir / "response.txt").write_text(raw)
+                (call_dir / "response.txt").write_text(raw, encoding="utf-8")
                 code, stdout, stderr, seconds, result_file = 0, raw, "", round(time.monotonic() - call_started, 3), None
             if command:
                 def heartbeat(elapsed, remaining):
-                    print(json.dumps({"stage": "agent_call", "status": "still_running", "role": role,
-                                      "elapsed_seconds": elapsed, "remaining_timeout_seconds": remaining},
-                                     ensure_ascii=False), flush=True)
+                    event = {"stage": "agent_call", "status": "still_running", "role": role,
+                             "elapsed_seconds": elapsed}
+                    if remaining is not None:
+                        event["remaining_timeout_seconds"] = remaining
+                    print(json.dumps(event, ensure_ascii=False), flush=True)
                 code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=stdin,
-                                                          timeout=min(self.timeout, remaining), log=call_dir / "process.log",
-                                                          on_progress=heartbeat, progress_interval=30)
+                                                           timeout=None, log=call_dir / "process.log",
+                                                           on_progress=heartbeat, on_output=lambda stream, chunk:
+                                                           print(json.dumps({"stage": "agent_stream", "role": role,
+                                                                             "stream": stream,
+                                                                             "text": chunk[:4000]},
+                                                                            ensure_ascii=False), flush=True),
+                                                           progress_interval=30)
             write_json(call_dir / "execution.json", {"exit_code": code, "seconds": seconds,
                        "backend": "command" if command else profile["backend"], "model": profile.get("model", "local-default"), "role": role})
             if code:
@@ -223,14 +237,17 @@ class Agent:
                 request_manifest["exit_code"] = code
                 write_json(call_dir / "request-manifest.json", request_manifest)
                 raise RefinerError(f"Agent {role} failed (exit {code}); see {call_dir / 'process.log'}")
-            raw = result_file.read_text() if result_file and result_file.exists() else stdout
+            raw = result_file.read_text(encoding="utf-8") if result_file and result_file.exists() else stdout
             raw = raw.strip()
         if raw.startswith("```"):
             raw = "\n".join(raw.splitlines()[1:-1])
         try:
             response = json.loads(raw)
+            if profile["backend"] in {"codex", "codex_subagent"}:
+                from .runtime import decode_codex_response
+                response = decode_codex_response(response, schema)
             jsonschema.validate(response, schema)
-        except (json.JSONDecodeError, jsonschema.ValidationError) as exc:
+        except (ValueError, TypeError, jsonschema.ValidationError) as exc:
             if call_dir is not None:
                 (call_dir / "raw-response.txt").write_text(raw, encoding="utf-8")
                 request_manifest["status"] = "invalid_response"

@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -29,6 +30,33 @@ def executable(profile, name):
     return str(Path(value).resolve()) if Path(value).is_file() else value
 
 
+def cursor_command(binary):
+    """Bypass Windows command shims so Unicode prompts survive argument parsing."""
+    launcher = Path(binary)
+    if os.name != "nt" or launcher.suffix.lower() not in {".cmd", ".bat"}:
+        return [str(binary)], False
+    root = launcher.parent
+    node, script = root / "node.exe", root / "index.js"
+    if node.is_file() and script.is_file():
+        return [str(node), str(script)], True
+    versions = root / "versions"
+    pattern = re.compile(r"(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d{2})-(\d{2})-(\d{2}))?-([a-f0-9]+)", re.I)
+    candidates = []
+    if versions.is_dir():
+        for directory in versions.iterdir():
+            match = pattern.fullmatch(directory.name)
+            node, script = directory / "node.exe", directory / "index.js"
+            if directory.is_dir() and match and node.is_file() and script.is_file():
+                year, month, day, hour, minute, second, _ = match.groups()
+                key = (int(year), int(month), int(day), int(hour or 0), int(minute or 0),
+                       int(second or 0), directory.stat().st_mtime_ns)
+                candidates.append((key, node, script))
+    if not candidates:
+        raise RefinerError(f"Cursor Windows launcher has no usable Node runtime: {launcher}")
+    _, node, script = max(candidates, key=lambda item: item[0])
+    return [str(node), str(script)], True
+
+
 def json_lines(text):
     rows = []
     for line in text.splitlines():
@@ -39,6 +67,135 @@ def json_lines(text):
         except ValueError:
             continue
     return rows
+
+
+def codex_output_schema(schema):
+    """Lower Refiner schemas to Codex strict-output-compatible JSON Schema."""
+    if not isinstance(schema, dict) or not schema:
+        return {"type": "string"}
+    if "anyOf" in schema:
+        return {"anyOf": [codex_output_schema(item) for item in schema["anyOf"]]}
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        dynamic = schema.get("additionalProperties")
+        properties = schema.get("properties", {})
+        if isinstance(dynamic, dict) and not properties:
+            return {"type": "array", "items": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}, "value": codex_output_schema(dynamic)},
+                "required": ["key", "value"], "additionalProperties": False,
+            }}
+        lowered = {}
+        required = set(schema.get("required", []))
+        for name, child in properties.items():
+            wire_name = name + "_json" if not child else name
+            value = codex_output_schema(child)
+            if not child:
+                value["description"] = "JSON serialization of the original value; encode strings with JSON quotes."
+            if name not in required:
+                value = {"anyOf": [value, {"type": "null"}]}
+            lowered[wire_name] = value
+        return {"type": "object", "properties": lowered, "required": list(lowered),
+                "additionalProperties": False}
+    if schema_type == "array":
+        return {"type": "array", "items": codex_output_schema(schema.get("items", {}))}
+    if "enum" in schema:
+        values = schema["enum"]
+        inferred = schema_type
+        if not inferred and values:
+            if all(isinstance(item, str) for item in values):
+                inferred = "string"
+            elif all(isinstance(item, bool) for item in values):
+                inferred = "boolean"
+            elif all(isinstance(item, int) and not isinstance(item, bool) for item in values):
+                inferred = "integer"
+            elif all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in values):
+                inferred = "number"
+        return {"type": inferred or "string", "enum": values}
+    if "const" in schema:
+        value = schema["const"]
+        inferred = schema_type or ("string" if isinstance(value, str) else "boolean" if isinstance(value, bool)
+                                   else "integer" if isinstance(value, int) else "number")
+        return {"type": inferred, "enum": [value]}
+    if schema_type in {"string", "integer", "number", "boolean", "null"}:
+        return {"type": schema_type}
+    return {"type": "string"}
+
+
+def decode_codex_response(value, schema):
+    """Restore strict-output wire encodings before canonical Refiner validation."""
+    if not schema:
+        if not isinstance(value, str):
+            raise ValueError("unconstrained JSON field must be a JSON-encoded string")
+        return json.loads(value)
+    if "anyOf" in schema:
+        if value is None:
+            return None
+        for option in schema["anyOf"]:
+            if option.get("type") == "null":
+                continue
+            try:
+                return decode_codex_response(value, option)
+            except (ValueError, TypeError, KeyError):
+                continue
+        raise ValueError("Codex response does not match any original schema branch")
+    if schema.get("type") == "object":
+        dynamic = schema.get("additionalProperties")
+        properties = schema.get("properties", {})
+        if isinstance(dynamic, dict) and not properties:
+            if not isinstance(value, list):
+                raise ValueError("dynamic object must be encoded as key/value entries")
+            restored = {}
+            for item in value:
+                if not isinstance(item, dict) or not isinstance(item.get("key"), str) or "value" not in item:
+                    raise ValueError("dynamic object entry must contain string key and value")
+                key = item["key"]
+                if key in restored:
+                    raise ValueError("duplicate key in dynamic object encoding: " + key)
+                restored[key] = decode_codex_response(item["value"], dynamic)
+            return restored
+        if not isinstance(value, dict):
+            raise ValueError("object response has the wrong shape")
+        required = set(schema.get("required", []))
+        restored = dict(value)
+        value_kind = value.get("type")
+        string_value_kinds = {"contains", "not_contains", "regex", "text_equal", "tool_command", "tool_command_absent",
+                              "tool_call_absent", "tool_output_matches", "json_path_regex", "file_exists",
+                              "file_contains", "file_text_equal"}
+        for name, child in properties.items():
+            wire_name = name + "_json" if not child else name
+            if wire_name not in restored:
+                continue
+            if restored[wire_name] is None and name not in required:
+                del restored[wire_name]
+            else:
+                raw_value = restored.pop(wire_name) if wire_name != name else restored[wire_name]
+                if not child and name == "value" and value_kind in string_value_kinds and isinstance(raw_value, str):
+                    try:
+                        decoded = json.loads(raw_value)
+                        restored[name] = decoded if isinstance(decoded, str) else raw_value
+                    except json.JSONDecodeError:
+                        restored[name] = raw_value
+                else:
+                    restored[name] = decode_codex_response(raw_value, child)
+        return restored
+    if schema.get("type") == "array":
+        if not isinstance(value, list):
+            raise ValueError("array response has the wrong shape")
+        return [decode_codex_response(item, schema.get("items", {})) for item in value]
+    return value
+
+
+def codex_schema_instructions(schema):
+    return (
+        "\n\nCodex strict-output wire encoding: include every field declared in response_schema; "
+        "use null for an optional field you would otherwise omit. For any field whose original "
+        "schema is unconstrained {}, its field name ends in _json; encode the actual JSON value "
+        "as a string containing one complete valid JSON value (including quotes for a string). "
+        "For objects whose original schema permits arbitrary keys through additionalProperties, "
+        "encode the object as an array of {key, value} entries. The controller restores these "
+        "encodings and then validates the original schema."
+    )
 
 
 def tool_pair(call_id, name, args, output, success, exit_code=None):
@@ -122,7 +279,7 @@ def native_rollouts(thread_id, started):
     root_path = next((p for p, m in records if m.get("id") == thread_id), None)
     if not root_path:
         raise RefinerError("Native delegation cannot be verified: parent rollout missing")
-    parents = json_lines(root_path.read_text())
+    parents = json_lines(root_path.read_text(encoding="utf-8"))
     spawn = any(r.get("type") == "response_item" and r.get("payload", {}).get("type") == "function_call"
                 and r["payload"].get("name", "").split(".")[-1] == "spawn_agent" for r in parents)
     # Older CLIs expose spawn as a collab item rather than function_call.
@@ -140,7 +297,7 @@ def native_rollouts(thread_id, started):
         raise RefinerError("Native delegation was requested but no actual spawned child was recorded")
     trace, evidence, artifacts = [], [], []
     for path, meta in children:
-        rows = json_lines(path.read_text())
+        rows = json_lines(path.read_text(encoding="utf-8"))
         complete = any(r.get("type") == "event_msg" and r.get("payload", {}).get("type") in
                        {"task_complete", "task_completed"} for r in rows)
         if not complete:
@@ -162,15 +319,57 @@ def native_rollouts(thread_id, started):
     return trace, evidence, artifacts
 
 
-def run_cli(profile, prompt, cwd, timeout, *, planning=False):
+def run_cli(profile, prompt, cwd, timeout, *, planning=False, progress_label=None, response_schema=None):
     backend, cwd = profile["backend"], Path(cwd)
     extra, artifacts = {}, []
     started = time.time()
+
+    def stream_output(stream_name, chunk):
+        if stream_name != "stdout" or not progress_label:
+            return
+        try:
+            event = json.loads(chunk)
+        except (ValueError, TypeError):
+            event = {"type": "text", "text": chunk.rstrip("\r\n")}
+        event_type = event.get("type", "unknown") if isinstance(event, dict) else "unknown"
+        candidates = []
+        if isinstance(event, dict):
+            item = event.get("item", {})
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                candidates.append(item["text"])
+            for key in ("delta", "text", "result"):
+                value = event.get(key)
+                if isinstance(value, str):
+                    candidates.append(value)
+            message = event.get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    candidates.append(content)
+                if isinstance(content, list):
+                    candidates.extend(item.get("text", "") for item in content
+                                      if isinstance(item, dict) and isinstance(item.get("text"), str))
+            error = event.get("error")
+            if isinstance(error, dict):
+                candidates.extend(value for key in ("message", "detail", "code")
+                                  if isinstance((value := error.get(key)), str))
+            elif isinstance(error, str):
+                candidates.append(error)
+        text = next((value for value in reversed(candidates) if value), "")
+        payload = {"stage": "agent_stream", "status": "event", "role": progress_label,
+                   "backend": backend, "event_type": event_type}
+        if text:
+            payload["text"] = text[:4000]
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
     if backend in {"codex", "codex_subagent"}:
         native = backend == "codex_subagent"
         argv = [executable(profile, "codex"), "exec", "--skip-git-repo-check", "--sandbox",
                 "read-only" if planning else profile.get("codex_sandbox", "workspace-write"),
                 "--color", "never", "--json"]
+        if response_schema is not None:
+            schema_path = cwd / "response-schema.json"
+            schema_path.write_text(json.dumps(response_schema, ensure_ascii=False), encoding="utf-8")
+            argv += ["--output-schema", str(schema_path)]
         if not native:
             argv += ["--ephemeral"]
         else:
@@ -187,26 +386,32 @@ def run_cli(profile, prompt, cwd, timeout, *, planning=False):
         if profile.get("reasoning_effort"):
             argv += ["-c", "model_reasoning_effort=" + json.dumps(profile["reasoning_effort"])]
         argv += ["-"]
-        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=prompt, timeout=timeout)
+        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=prompt, timeout=timeout,
+                                                    on_output=stream_output if progress_label else None)
         if code:
-            raise RefinerError(f"{backend} failed (exit {code}): {stderr[-1500:]}")
+            detail = (stderr or stdout or "(no CLI diagnostics)").strip()
+            raise RefinerError(f"{backend} failed (exit {code}): {detail[-1500:]}")
         events = json_lines(stdout)
         final, trace = parse_codex(events)
         if native:
             thread_id = next((e["thread_id"] for e in events if e.get("type") == "thread.started"), None)
             trace, extra["native_children"], artifacts = native_rollouts(thread_id, started)
     elif backend == "cursor":
-        argv = [executable(profile, "cursor-agent"), "--print", "--output-format", "stream-json",
-                "--workspace", str(cwd)]
-        argv += ["--mode", "ask"] if planning else ["--force"]
+        command, direct_node = cursor_command(executable(profile, "cursor-agent"))
+        argv = command + ["--print", "--output-format", "stream-json", "--workspace", str(cwd)]
+        argv += ["--mode", "ask", "--trust"] if planning else ["--force"]
         if profile.get("model"):
             argv += ["--model", profile["model"]]
-        argv += [prompt]
+        argv += ["agent"]
         env = os.environ.copy()
         env["NO_OPEN_BROWSER"] = "1"
-        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, timeout=timeout, env=env)
+        if direct_node:
+            env["CURSOR_INVOKED_AS"] = "cursor-agent"
+        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=prompt, timeout=timeout, env=env,
+                                                    on_output=stream_output if progress_label else None)
         if code:
-            raise RefinerError(f"Cursor failed (exit {code}); login may be required: {stderr[-1500:]}")
+            detail = (stderr or stdout or "(no CLI diagnostics)").strip()
+            raise RefinerError(f"Cursor failed (exit {code}); login may be required: {detail[-1500:]}")
         final, trace = parse_cursor(json_lines(stdout))
     elif backend == "claude_code":
         argv = [executable(profile, "claude"), "--print", "--output-format", "stream-json", "--verbose",
@@ -214,9 +419,11 @@ def run_cli(profile, prompt, cwd, timeout, *, planning=False):
         argv += ["--tools", ""] if planning else ["--permission-mode", "bypassPermissions"]
         if profile.get("model"):
             argv += ["--model", profile["model"]]
-        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=prompt, timeout=timeout)
+        code, stdout, stderr, seconds = run_process(argv, cwd=cwd, input_text=prompt, timeout=timeout,
+                                                    on_output=stream_output if progress_label else None)
         if code:
-            raise RefinerError(f"Claude Code failed (exit {code}): {stderr[-1500:]}")
+            detail = (stderr or stdout or "(no CLI diagnostics)").strip()
+            raise RefinerError(f"Claude Code failed (exit {code}): {detail[-1500:]}")
         final, trace = "", []
         calls, done = {}, False
         for e in json_lines(stdout):
@@ -290,10 +497,10 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
                  "Use installed Skill instructions when requested. Tool execution is local to the supplied workspace; "
                  "return the actual observed result. Do not access unrelated host files or services."},
                 {"role": "user", "content": prompt}]
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
     for turn in range(profile.get("max_turns", 12)):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
             raise RefinerError("Model tool loop exhausted its wall-clock budget")
         message, used = api_request(profile, messages, [] if planning else TOOLS, remaining)
         usage.append(used)
@@ -312,20 +519,20 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
             success, output = True, ""
             exit_code = None
             try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
                     raise RefinerError("Model tool loop exhausted its wall-clock budget")
                 if name == "shell":
                     code, out, err, _ = run_process(["/bin/sh", "-c", args["command"]], cwd=cwd,
-                                                   timeout=min(remaining, 60))
+                                                   timeout=60 if remaining is None else min(remaining, 60))
                     success, output = code == 0, out + err
                     exit_code = code
                 elif name == "read_file":
-                    output = relative_path(cwd, args["path"]).read_text()
+                    output = relative_path(cwd, args["path"]).read_text(encoding="utf-8")
                 elif name == "write_file":
                     path = relative_path(cwd, args["path"])
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(args["content"])
+                    path.write_text(args["content"], encoding="utf-8")
                     output = "File written"
                 else:
                     raise RefinerError(f"Unsupported model tool: {name}")
@@ -338,23 +545,26 @@ def run_api(profile, prompt, cwd, timeout, *, planning=False):
     raise RefinerError("Model exhausted max_turns without a final answer")
 
 
-def execute(profile, prompt, cwd, timeout, *, planning=False, progress_label=None):
-    timeout = min(timeout, profile.get("timeout", timeout))
+def execute(profile, prompt, cwd, timeout, *, planning=False, progress_label=None, response_schema=None):
+    if timeout is not None and profile.get("timeout") is not None:
+        timeout = min(timeout, profile["timeout"])
     started = time.monotonic()
     stop = threading.Event()
     def heartbeat():
         while not stop.wait(30):
             elapsed = round(time.monotonic() - started, 1)
-            print(json.dumps({"stage": "agent_call", "status": "still_running",
-                              "role": progress_label or "unknown", "elapsed_seconds": elapsed,
-                              "remaining_timeout_seconds": round(max(0, timeout - elapsed), 1)},
-                             ensure_ascii=False), flush=True)
+            event = {"stage": "agent_call", "status": "still_running",
+                     "role": progress_label or "unknown", "elapsed_seconds": elapsed}
+            if timeout is not None:
+                event["remaining_timeout_seconds"] = round(max(0, timeout - elapsed), 1)
+            print(json.dumps(event, ensure_ascii=False), flush=True)
     watcher = threading.Thread(target=heartbeat, name="skill-refiner-progress", daemon=True)
     watcher.start()
     try:
         if profile["backend"] == "openai_compatible":
             return run_api(profile, prompt, cwd, timeout, planning=planning)
-        return run_cli(profile, prompt, cwd, timeout, planning=planning)
+        return run_cli(profile, prompt, cwd, timeout, planning=planning, progress_label=progress_label,
+                       response_schema=response_schema)
     finally:
         stop.set()
         watcher.join(timeout=1)

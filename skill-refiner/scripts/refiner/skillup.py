@@ -100,7 +100,7 @@ class SkillUp:
             grader.chmod(0o755)
             native = {"id": case["id"], "title": case["id"], "input": {"prompt": case["prompt"]},
                       "context": {"files": {**case["files"], **(
-                          {"refiner-python-probe.py": Path(__file__).with_name("python_probe.py").read_text()}
+        {"refiner-python-probe.py": Path(__file__).with_name("python_probe.py").read_text(encoding="utf-8")}
                           if "python_probe" in case.get("helpers", []) else {})}},
                       "constraints": {"timeout_seconds": self.timeout},
                       "judge": {"type": "script", "script_path": str(grader), "timeout_seconds": 30}}
@@ -210,7 +210,7 @@ class SkillUp:
             if (target / "evals" / "evals.json").exists():
                 raise RefinerError("Existing Anthropic evals.json must first be imported with skill-up import")
             return None
-        native = yaml.safe_load(config.read_text())
+        native = yaml.safe_load(config.read_text(encoding="utf-8"))
         if not isinstance(native, dict) or native.get("environment", {}).get("type", "none") != "none":
             raise RefinerError("v0.1 existing eval suites must use environment.type=none")
         native["engine"] = self.engine

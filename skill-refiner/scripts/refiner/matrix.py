@@ -100,4 +100,4 @@ def comparison_markdown(result):
 
 
 def write_comparison(directory, result):
-    (Path(directory) / "comparison.md").write_text(comparison_markdown(result))
+    (Path(directory) / "comparison.md").write_text(comparison_markdown(result), encoding="utf-8")

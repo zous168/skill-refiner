@@ -8,7 +8,7 @@ import shlex
 import itertools
 import tempfile
 
-from .common import RefinerError, relative_path
+from .common import PlanControlError, PlanValidationError, RefinerError, relative_path
 
 
 def command_forms(command, root=None, literal=False):
@@ -146,7 +146,7 @@ def check_one(check, response, root, transcript=None):
                 transcript_path = os.environ.get("EVAL_TRANSCRIPT_PATH")
                 if not transcript_path or not Path(transcript_path).is_file():
                     return False, "Execution transcript unavailable; cannot prove command execution"
-                transcript = json.loads(Path(transcript_path).read_text())
+                transcript = json.loads(Path(transcript_path).read_text(encoding="utf-8"))
             commands, tool_names, matched_ids, matched_order, results = [], [], set(), [], {}
 
             def visit(value):
@@ -278,8 +278,12 @@ def check_one(check, response, root, transcript=None):
             actual = p.read_bytes().decode("utf-8")
         if kind in {"contains", "file_contains"}:
             passed = str(expected) in actual
+        elif kind == "contains_any":
+            passed = isinstance(expected, list) and any(str(value) in actual for value in expected)
         elif kind == "not_contains":
             passed = str(expected) not in actual
+        elif kind == "not_contains_any":
+            passed = isinstance(expected, list) and not any(str(value) in actual for value in expected)
         elif kind == "regex":
             passed = re.search(str(expected), actual) is not None
         elif kind == "json_path_regex":
@@ -314,11 +318,64 @@ def check_one(check, response, root, transcript=None):
         return False, f"{kind}: {exc}"
 
 
+def assertion_diagnostic(check, response, root, *, passed=None, transcript=None):
+    """Return a stable, field-level result for reports and plan-control failures."""
+    if passed is None:
+        passed, evidence = check_one(check, response, root, transcript)
+    else:
+        _, evidence = check_one(check, response, root, transcript)
+    kind = check["type"]
+    pointer = check.get("pointer")
+    path = check.get("path")
+    if pointer is not None:
+        field_path = (f"file:{path}#{pointer}" if kind.startswith("file_") else f"response#{pointer}")
+    elif path is not None:
+        field_path = f"file:{path}"
+    elif kind in {"tool_command", "tool_command_absent", "tool_call_absent", "tool_output_matches"}:
+        field_path = "tool_transcript"
+    else:
+        field_path = "response"
+    expected = {"operator": kind, "value": check.get("value")}
+    for key in ("path", "pointer", "expected_exit_code", "control_command", "control_tool_name"):
+        if key in check:
+            expected[key] = check[key]
+    try:
+        if kind.startswith("file_"):
+            target = relative_path(root, path)
+            if kind == "file_exists":
+                actual = target.is_file()
+            elif not target.is_file():
+                actual = "<missing file>"
+            else:
+                raw = target.read_bytes().decode("utf-8")
+                actual = raw
+                if kind in {"file_json_equal", "file_json_path_equal"}:
+                    actual = json.loads(raw)
+                    if kind == "file_json_path_equal":
+                        actual = json_pointer_get(actual, pointer)
+        elif kind in {"json_equal", "json_sequence_equal", "json_path_equal", "json_path_regex",
+                      "json_path_matches_file"}:
+            actual = parse_json_output(response)
+            if kind in {"json_path_equal", "json_path_regex", "json_path_matches_file"}:
+                actual = json_pointer_get(actual, pointer)
+        elif kind in {"tool_command", "tool_command_absent", "tool_call_absent", "tool_output_matches"}:
+            actual = evidence
+        else:
+            actual = response
+    except (ValueError, KeyError, IndexError, OSError, TypeError, RefinerError) as exc:
+        actual = f"<unavailable: {type(exc).__name__}: {exc}>"
+    if isinstance(actual, str) and len(actual) > 1500:
+        actual = actual[:1500] + "…"
+    return {"assertion_id": check["id"], "field_path": field_path,
+            "expected_condition": expected, "actual_value": actual,
+            "passed": bool(passed), "evidence": evidence}
+
+
 def grade(case, response, root):
     assertions = []
     for check in case["checks"]:
-        passed, evidence = check_one(check, response, root)
-        assertions.append({"check": check, "passed": passed, "evidence": evidence})
+        result = assertion_diagnostic(check, response, root)
+        assertions.append({"check": check, **result})
     return {"case_id": case["id"], "passed": all(a["passed"] for a in assertions), "assertions": assertions}
 
 
@@ -364,7 +421,7 @@ def validate_plan(plan, root, max_cases=8):
     requirements = {r["id"]: r for r in plan["requirements"]}
     if len(requirements) != len(plan["requirements"]):
         raise RefinerError("Duplicate requirement IDs")
-    covered, ids = set(), set()
+    covered, ids, control_evidence, control_failures, asset_audit_failures = set(), set(), [], [], []
     for case in plan["cases"]:
         if case["id"] in ids:
             raise RefinerError(f"Duplicate case ID: {case['id']}")
@@ -378,6 +435,42 @@ def validate_plan(plan, root, max_cases=8):
         if not set(case["requirement_ids"]) <= requirements.keys():
             raise RefinerError(f"Unknown requirement reference: {case['id']}")
         covered.update(case["requirement_ids"])
+        linked_sources = {requirements[item]["source"] for item in case["requirement_ids"]}
+        audit = case["asset_audit"]
+        required_assets = set(audit["required_paths"])
+        available_assets = set(audit["available_paths"])
+        fixture_assets = set(case["files"])
+        helper_assets = {"helper:" + item for item in case["helpers"]}
+        missing_assets = sorted(required_assets - available_assets)
+        unlisted_assets = sorted((fixture_assets | helper_assets) - required_assets)
+        unprovided_fixtures = sorted((fixture_assets | helper_assets) - available_assets)
+        missing_sources = sorted(linked_sources - set(audit["source_refs"]))
+        extra_sources = sorted(set(audit["source_refs"]) - linked_sources)
+        expected_asset_status = "ready" if required_assets else "not_required"
+        unavailable_claims = []
+        for asset_path in sorted(available_assets):
+            if asset_path in fixture_assets or asset_path in helper_assets:
+                continue
+            try:
+                if not relative_path(original_root, asset_path).is_file():
+                    unavailable_claims.append(asset_path)
+            except RefinerError:
+                unavailable_claims.append(asset_path)
+        if (missing_assets or unlisted_assets or unprovided_fixtures or unavailable_claims
+                or missing_sources or extra_sources
+                or audit["status"] != expected_asset_status):
+            asset_audit_failures.append({
+                "case_id": case["id"], "field_path": "asset_audit",
+                "expected_condition": {"status": expected_asset_status,
+                                       "all_required_available": True,
+                                        "available_source_assets_exist": True,
+                                       "fixtures_and_helpers_listed": True,
+                                       "source_refs_equal_linked_sources": True},
+                "actual_value": {"status": audit["status"], "missing_assets": missing_assets,
+                                 "unlisted_assets": unlisted_assets,
+                                 "unprovided_fixtures": unprovided_fixtures,
+                                  "unavailable_claims": unavailable_claims,
+                                 "missing_sources": missing_sources, "extra_sources": extra_sources}})
         linked_requirements = [requirements[item]["behavior"] for item in case["requirement_ids"]]
         boundary_contract = "\n".join([case["prompt"], *linked_requirements]).lower()
         if re.search(r"(?:invalid|malformed|bad|non.?utf|encoding|encoded).{0,35}(?:utf.?8|byte)|(?:utf.?8|byte).{0,35}(?:invalid|malformed|decode|encoding)", boundary_contract):
@@ -399,6 +492,29 @@ def validate_plan(plan, root, max_cases=8):
                     or Path(name).name in {"AGENTS.md", "CLAUDE.md", ".cursorrules", ".mcp.json"}
                     or name.endswith("SKILL.md")):
                 raise RefinerError(f"Fixture cannot inject Skill instructions or oracles: {name}")
+        assertion_ids = [check["id"] for check in case["checks"]]
+        if len(assertion_ids) != len(set(assertion_ids)):
+            raise RefinerError(f"Duplicate assertion id in case {case['id']}: {assertion_ids}")
+        positive_controls = case["positive_controls"]
+        negative_controls = case["negative_controls"]
+        control_ids = [control["id"] for control in positive_controls + negative_controls]
+        if len(control_ids) != len(set(control_ids)):
+            raise RefinerError(f"Duplicate control id in case {case['id']}: {control_ids}")
+        positive_texts = [control["response"].strip() for control in positive_controls]
+        negative_texts = [control["response"].strip() for control in negative_controls]
+        if len(positive_texts) != len(set(positive_texts)):
+            raise RefinerError(f"Positive controls must use distinct response wording: {case['id']}")
+        if len(negative_texts) != len(set(negative_texts)):
+            raise RefinerError(f"Negative controls must use distinct response wording: {case['id']}")
+        if set(positive_texts) & set(negative_texts):
+            raise RefinerError(f"A response cannot be both a positive and negative control: {case['id']}")
+        if not positive_controls or positive_controls[0]["response"] != case["good_response"]:
+            raise RefinerError(f"Canonical positive control mismatch: {case['id']}")
+        if case["bad_response"] not in {control["response"] for control in negative_controls}:
+            raise RefinerError(f"Canonical bad_response must be one of the negative controls: {case['id']}")
+        if case.get("good_responses") and case["good_responses"] != [
+                control["response"] for control in positive_controls[1:]]:
+            raise RefinerError(f"Legacy good_responses do not match positive_controls: {case['id']}")
         for check in case["checks"]:
             if (check["type"] == "json_path_equal"
                     and check.get("pointer", "").rsplit("/", 1)[-1].lower() in {"status", "state"}
@@ -445,106 +561,157 @@ def validate_plan(plan, root, max_cases=8):
                     raise RefinerError(f"Checker regex matches empty evidence: {case['id']}")
             if check["type"] in {"contains", "not_contains", "file_contains"} and not str(check["value"]):
                 raise RefinerError(f"Empty content check: {case['id']}")
+            if check["type"] in {"contains_any", "not_contains_any"} and (
+                    not isinstance(check["value"], list) or len(check["value"]) < 2
+                    or any(not isinstance(value, str) or not value.strip() for value in check["value"])):
+                raise RefinerError(f"{check['type']} needs at least two nonempty equivalent phrases: {case['id']}")
         substantive = [c for c in case["checks"] if c["type"] not in {
             "file_exists", "tool_command", "tool_command_absent", "tool_call_absent", "tool_output_matches"}]
         if not substantive:
             raise RefinerError(f"Case {case['id']} only tests file/command existence, not task results")
-        response_checks = [c for c in substantive if not c["type"].startswith("file_")]
+        non_response_types = {"file_exists", "tool_command", "tool_command_absent",
+                              "tool_call_absent", "tool_output_matches"}
+        response_checks = [c for c in substantive if c["type"] not in non_response_types
+                           and not c["type"].startswith("file_")]
+        if not response_checks:
+            raise RefinerError(f"Case {case['id']} needs at least one response assertion for its business outcome")
         if response_checks:
-            positive_responses = [case["good_response"], *case.get("good_responses", [])]
             text_only_oracle = (
-                any(c["type"] in {"contains", "not_contains", "regex", "text_equal"}
+                any(c["type"] in {"contains", "contains_any", "not_contains", "not_contains_any", "regex", "text_equal"}
                     for c in response_checks)
                 and not any(c["type"].startswith("json_") for c in response_checks)
             )
-            if text_only_oracle and len(case.get("good_responses", [])) < 2:
+            if text_only_oracle and len(positive_controls) < 3:
                 raise RefinerError(
-                    f"Natural-language case {case['id']} needs at least two additional good-response paraphrase controls"
+                    f"Natural-language case {case['id']} needs at least three distinct positive controls"
                 )
             dynamic = [c for c in response_checks if c["type"] == "json_path_matches_file"]
-            if dynamic:
-                for response_index, response in enumerate(positive_responses, 1):
-                    try:
-                        good = parse_json_output(response)
-                        with tempfile.TemporaryDirectory() as control_root:
-                            observed_by_path = {}
-                            for check in dynamic:
-                                value = json_pointer_get(good, check["pointer"])
-                                relative = check["path"]
-                                observed = observed_by_path.setdefault(relative, {})
-                                observed_by_path[relative] = json_pointer_set(
-                                    observed, json_path_matches_file_pointer(check), value)
-                            for relative, observed in observed_by_path.items():
-                                path = relative_path(control_root, relative)
-                                path.parent.mkdir(parents=True, exist_ok=True)
-                                path.write_text(json.dumps(observed), encoding="utf-8")
-                            if not all(check_one(c, response, control_root)[0]
-                                       for c in response_checks):
-                                raise RefinerError(
-                                    f"Good-response control {response_index} rejected by {case['id']}"
-                                )
-                    except (KeyError, TypeError, ValueError) as exc:
-                        raise RefinerError(f"Invalid dynamic file control {response_index} in {case['id']}: {exc}") from exc
+            def control_root_for(response, control_root):
+                if not dynamic:
+                    return
+                good = parse_json_output(response)
+                observed_by_path = {}
+                for check in dynamic:
+                    value = json_pointer_get(good, check["pointer"])
+                    relative = check["path"]
+                    observed = observed_by_path.setdefault(relative, {})
+                    observed_by_path[relative] = json_pointer_set(
+                        observed, json_path_matches_file_pointer(check), value)
+                for relative, observed in observed_by_path.items():
+                    path = relative_path(control_root, relative)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(observed), encoding="utf-8")
+
+            control_results = []
+            for control in positive_controls:
+                setup_error = None
                 try:
-                    good = parse_json_output(positive_responses[0])
-                    with tempfile.TemporaryDirectory() as control_root:
-                        observed_by_path = {}
-                        for check in dynamic:
-                            value = json_pointer_get(good, check["pointer"])
-                            relative = check["path"]
-                            observed = observed_by_path.setdefault(relative, {})
-                            observed_by_path[relative] = json_pointer_set(
-                                observed, json_path_matches_file_pointer(check), value)
-                        for relative, observed in observed_by_path.items():
-                            path = relative_path(control_root, relative)
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                            path.write_text(json.dumps(observed), encoding="utf-8")
-                        if all(check_one(c, case["bad_response"], control_root)[0]
-                               for c in response_checks):
-                            matched = accepted_bad_response_checks(response_checks, case["bad_response"],
-                                                                  control_root)
-                            raise RefinerError(
-                                f"Bad-response control passes {case['id']}; response checks that still match: "
-                                + json.dumps(matched, ensure_ascii=False)
-                            )
+                    with tempfile.TemporaryDirectory() as temp_root:
+                        control_root_for(control["response"], temp_root)
+                        results = [assertion_diagnostic(check, control["response"], temp_root)
+                                   for check in response_checks]
                 except (KeyError, TypeError, ValueError) as exc:
-                    raise RefinerError(f"Invalid dynamic file control in {case['id']}: {exc}") from exc
-            else:
-                for response_index, response in enumerate(positive_responses, 1):
-                    if not all(check_one(c, response, root)[0] for c in response_checks):
-                        raise RefinerError(f"Good-response control {response_index} rejected by {case['id']}")
-                if all(check_one(c, case["bad_response"], root)[0] for c in response_checks):
-                    matched = accepted_bad_response_checks(response_checks, case["bad_response"], root)
-                    raise RefinerError(
-                        f"Bad-response control passes {case['id']}; response checks that still match: "
-                        + json.dumps(matched, ensure_ascii=False)
-                    )
+                    setup_error = f"{type(exc).__name__}: {exc}"
+                    results = [assertion_diagnostic(check, control["response"], root)
+                               for check in response_checks]
+                control_results.append({"control_id": control["id"], "polarity": "positive",
+                                        "assertions": results})
+                failures = [row for row in results if not row["passed"]]
+                if failures or setup_error:
+                    control_failures.append({
+                        "case_id": case["id"], "control_id": control["id"],
+                        "expected_condition": "every response assertion passes",
+                        "actual_value": failures, "setup_error": setup_error})
+
+            semantic_ids = {check["id"] for check in response_checks}
+            targeted_ids = {control["assertion_id"] for control in negative_controls}
+            unknown_targets = sorted(targeted_ids - semantic_ids)
+            uncovered_assertions = sorted(semantic_ids - targeted_ids)
+            if unknown_targets or uncovered_assertions:
+                control_failures.append({
+                    "case_id": case["id"], "field_path": "negative_controls[].assertion_id",
+                    "expected_condition": {"targets_exactly": sorted(semantic_ids)},
+                    "actual_value": {"unknown_targets": unknown_targets,
+                                     "assertions_without_negative_control": uncovered_assertions}})
+            for control in negative_controls:
+                setup_error = None
+                try:
+                    with tempfile.TemporaryDirectory() as temp_root:
+                        control_root_for(positive_controls[0]["response"], temp_root)
+                        results = [assertion_diagnostic(check, control["response"], temp_root)
+                                   for check in response_checks]
+                except (KeyError, TypeError, ValueError) as exc:
+                    setup_error = f"{type(exc).__name__}: {exc}"
+                    results = [assertion_diagnostic(check, control["response"], root)
+                               for check in response_checks]
+                actual_failures = {row["assertion_id"] for row in results if not row["passed"]}
+                expected_failures = {control["assertion_id"]}
+                control_results.append({"control_id": control["id"], "polarity": "negative",
+                                        "target_assertion_id": control["assertion_id"],
+                                        "assertions": results})
+                if actual_failures != expected_failures:
+                    control_failures.append({
+                        "case_id": case["id"], "control_id": control["id"],
+                        "target_assertion_id": control["assertion_id"],
+                        "field_path": next((row["field_path"] for row in results
+                                            if row["assertion_id"] == control["assertion_id"]), "checks"),
+                        "expected_condition": {"failed_assertion_ids": sorted(expected_failures),
+                                               "all_other_assertions": "pass"},
+                        "actual_value": {"failed_assertion_ids": sorted(actual_failures),
+                                         "assertions": results}, "setup_error": setup_error})
+        auxiliary_results = []
+
+        def check_auxiliary(control_id, check, response, check_root, transcript, expected_pass):
+            observed, _ = check_one(check, response, check_root, transcript)
+            result = assertion_diagnostic(check, response, check_root,
+                                          passed=observed, transcript=transcript)
+            auxiliary_results.append({"control_id": control_id, "polarity": "auxiliary",
+                                      "assertions": [result]})
+            if observed != expected_pass:
+                control_failures.append({
+                    "case_id": case["id"], "control_id": control_id,
+                    "assertion_id": result["assertion_id"], "field_path": result["field_path"],
+                    "expected_condition": {"passed": expected_pass,
+                                           "condition": result["expected_condition"]},
+                    "actual_value": result["actual_value"]})
         for check in case["checks"]:
             if check["type"] == "tool_command_absent":
                 command = check.get("control_command", "")
                 if not command or not re.search(str(check["value"]), command):
-                    raise RefinerError(f"Missing/nonmatching forbidden-command control: {case['id']}")
-                if not check_one(check, case["good_response"], root, [] )[0]:
-                    raise RefinerError(f"Good no-command trace rejected: {case['id']}")
+                    control_failures.append({"case_id": case["id"], "assertion_id": check["id"],
+                                             "field_path": "control_command",
+                                             "expected_condition": {"matches": check["value"]},
+                                             "actual_value": command})
+                    continue
+                check_auxiliary("positive-no-command", check, positive_controls[0]["response"],
+                                root, [], True)
                 trace = [{"role": "tool_call", "tool_call": {"id": "forbidden", "name": "command_execution",
                           "arguments": {"command": command}}}]
-                if check_one(check, case["good_response"], root, trace)[0]:
-                    raise RefinerError(f"Forbidden-command control not detected: {case['id']}")
+                check_auxiliary("negative-forbidden-command", check, positive_controls[0]["response"],
+                                root, trace, False)
             if check["type"] == "tool_call_absent":
                 tool_name = check.get("control_tool_name", "")
                 if not tool_name or not re.search(str(check["value"]), tool_name):
-                    raise RefinerError(f"Missing/nonmatching forbidden-tool-name control: {case['id']}")
-                if not check_one(check, case["good_response"], root, [])[0]:
-                    raise RefinerError(f"Good no-tool-call trace rejected: {case['id']}")
+                    control_failures.append({"case_id": case["id"], "assertion_id": check["id"],
+                                             "field_path": "control_tool_name",
+                                             "expected_condition": {"matches": check["value"]},
+                                             "actual_value": tool_name})
+                    continue
+                check_auxiliary("positive-no-tool-call", check, positive_controls[0]["response"],
+                                root, [], True)
                 trace = [{"role": "tool_call", "tool_call": {"id": "forbidden", "name": tool_name,
                           "arguments": {}}}]
-                if check_one(check, case["good_response"], root, trace)[0]:
-                    raise RefinerError(f"Forbidden tool-name control not detected: {case['id']}")
+                check_auxiliary("negative-forbidden-tool-call", check, positive_controls[0]["response"],
+                                root, trace, False)
             if check["type"] != "tool_output_matches":
                 continue
             command = check.get("control_command", "")
             if not command or not re.search(str(check["value"]), command):
-                raise RefinerError(f"Missing/nonmatching tool control command: {case['id']}")
+                control_failures.append({"case_id": case["id"], "assertion_id": check["id"],
+                                         "field_path": "control_command",
+                                         "expected_condition": {"matches": check["value"]},
+                                         "actual_value": command})
+                continue
             def trace(output):
                 exit_code = check.get("expected_exit_code", 0)
                 return [{"role": "tool_call", "tool_call": {"id": "control", "name": "command_execution",
@@ -552,10 +719,10 @@ def validate_plan(plan, root, max_cases=8):
                         {"role": "tool_result", "tool_result": {"call_id": "control",
                          "status": "success" if exit_code == 0 else "error", "exit_code": exit_code,
                          "content": output}}]
-            if not check_one(check, case["good_response"], root, trace(case["good_response"]))[0]:
-                raise RefinerError(f"Good execution trace rejected: {case['id']}")
-            if check_one(check, case["good_response"], root, trace(case["bad_response"]))[0]:
-                raise RefinerError(f"Corrected/hallucinated answer passes tool-output check: {case['id']}")
+            check_auxiliary("positive-observed-tool-output", check, positive_controls[0]["response"],
+                            root, trace(positive_controls[0]["response"]), True)
+            check_auxiliary("negative-mismatched-tool-output", check, case["good_response"],
+                            root, trace(case["bad_response"]), False)
         for check in substantive:
             if not check["type"].startswith("file_"):
                 continue
@@ -575,17 +742,31 @@ def validate_plan(plan, root, max_cases=8):
                             value = {token:value}
                 content = json.dumps(value) if check['type'] in {'file_json_equal','file_json_path_equal'} else str(value)
                 p.write_bytes(content.encode('utf-8'))
-                if not check_one(check, "", control_root)[0]:
-                    raise RefinerError(f"Good file control rejected: {case['id']}")
+                check_auxiliary("positive-file-fixture", check, "", control_root, None, True)
                 p.unlink()
-                if check_one(check, "", control_root)[0]:
-                    raise RefinerError(f"Missing file passes content check: {case['id']}")
+                check_auxiliary("negative-missing-file", check, "", control_root, None, False)
+        control_evidence.append({"case_id": case["id"], "controls": control_results,
+                                 "auxiliary_assertions": auxiliary_results})
     uncovered = [r["id"] for r in plan["requirements"] if r["required"] and r["id"] not in covered]
-    if uncovered:
-        raise RefinerError(f"Uncovered required behaviors: {uncovered}")
     kinds = {c["kind"] for c in plan["cases"]}
+    coverage_failures = list(asset_audit_failures)
+    if uncovered:
+        coverage_failures.append({"field_path": "requirements[].case_coverage",
+                                  "expected_condition": "every required requirement maps to a case",
+                                  "actual_value": {"uncovered_requirement_ids": uncovered}})
     if "normal" not in kinds or not kinds & {"boundary", "error", "negative"}:
-        raise RefinerError("Plan needs a normal case and at least one boundary/error/negative case")
+        coverage_failures.append({"field_path": "cases[].kind",
+                                  "expected_condition": "normal plus boundary/error/negative scenarios",
+                                  "actual_value": sorted(kinds)})
+    evidence = {"schema_version": "skill-refiner.plan-controls/v1",
+                "status": "failed" if control_failures else "invalid_coverage" if coverage_failures else "passed",
+                "case_control_results": control_evidence, "control_failures": control_failures,
+                "coverage_failures": coverage_failures}
+    if control_failures:
+        raise PlanControlError("Frozen plan controls failed: " + json.dumps(control_failures, ensure_ascii=False), evidence)
+    if coverage_failures:
+        raise PlanValidationError("Plan coverage self-check failed: " + json.dumps(coverage_failures, ensure_ascii=False), evidence)
+    return {"status": "passed", "case_control_results": control_evidence}
 
 
 def grader_main(case_path):

@@ -223,11 +223,11 @@ def run(args):
         if args.name and args.name != inputs.get("requested_name"):
             raise RefinerError("Resume name differs from the frozen creation inputs")
         if args.spec:
-            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec]
+            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text(encoding="utf-8")} for p in args.spec]
             if supplied != inputs.get("requirements"):
                 raise RefinerError("Resume requirements differ from the frozen creation inputs")
         if args.standard:
-            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.standard]
+            supplied = [{"source": str(Path(p).resolve()), "content": Path(p).read_text(encoding="utf-8")} for p in args.standard]
             frozen_standards = {row.get("source"): row.get("content")
                                 for row in inputs.get("standards", [])[1:] if isinstance(row, dict)}
             if any(frozen_standards.get(row["source"]) != row["content"] for row in supplied):
@@ -266,8 +266,8 @@ def run(args):
     agent.max_calls, agent.deadline = args.max_agent_calls, deadline
     if not resume_run:
         inputs = {"business_description": args.description or "", "requested_name": args.name,
-                  "requirements": [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in args.spec],
-                  "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text()} for p in standard_paths]}
+                  "requirements": [{"source": str(Path(p).resolve()), "content": Path(p).read_text(encoding="utf-8")} for p in args.spec],
+                  "standards": [AUTHORING] + [{"source": str(Path(p).resolve()), "content": Path(p).read_text(encoding="utf-8")} for p in standard_paths]}
     engine_config = read_json(args.engine_config) if args.engine_config else None
     execution = {"backend_config": config, "agent_command": args.agent_command, "engine": args.engine,
                  "engine_config": engine_config, "skill_up": args.skill_up, "timeout": args.timeout,
@@ -423,7 +423,7 @@ def run(args):
                           'max_seconds': args.max_seconds, **extra}, ensure_ascii=False), flush=True)
 
     def integrity():
-        if digest(read_json(work / 'inputs.json')) != input_hash or request_file.read_text() != inputs['business_description'] + '\n':
+        if digest(read_json(work / 'inputs.json')) != input_hash or request_file.read_text(encoding="utf-8") != inputs['business_description'] + '\n':
             raise RefinerError('Frozen business inputs changed')
         if locked and digest({'inputs': inputs, 'analysis': read_json(work / 'analysis.json')}) != locked:
             raise RefinerError('Frozen business contract changed')
@@ -478,7 +478,7 @@ def run(args):
                 continue
             break
         write_json(work / 'analysis.json', analysis)
-        (work / 'business-analysis.md').write_text(analysis_markdown(analysis))
+        (work / 'business-analysis.md').write_text(analysis_markdown(analysis), encoding="utf-8")
         write_work_plan(work, analysis=analysis, limits=limits)
         locked = digest({'inputs': inputs, 'analysis': analysis})
         write_json(work / 'business.lock.json', {'sha256': locked, 'input_sha256': input_hash})
@@ -598,12 +598,12 @@ def run(args):
                 shutil.move(str(final), str(archived / final.name))
             snapshot(refinement_final, final)
         # The repair diff may be empty when the first implementation already passes.
-        (work / 'final/changes.patch').write_text((work / 'refinement/final/changes.patch').read_text())
+        (work / 'final/changes.patch').write_text((work / 'refinement/final/changes.patch').read_text(encoding="utf-8"), encoding="utf-8")
         full_patch = []
         for path in sorted(manifest(final)):
-            full_patch.extend(difflib.unified_diff([], (final / path).read_text().splitlines(True),
+            full_patch.extend(difflib.unified_diff([], (final / path).read_text(encoding="utf-8").splitlines(True),
                                                   '/dev/null', 'created/' + path))
-        (work / 'final/creation.patch').write_text(''.join(full_patch))
+        (work / 'final/creation.patch').write_text(''.join(full_patch), encoding="utf-8")
         write_json(work / 'final/evidence.json', {'business_lock': locked, 'draft_manifest': initial_manifest,
                    'candidate_manifest': manifest(final), 'refinement_evidence': str(work / 'refinement/final/evidence.json'),
                    'refinement_evidence_sha256': digest(read_json(work / 'refinement/final/evidence.json'))})
@@ -617,7 +617,7 @@ def run(args):
         return state
     finally:
         if analysis is not None and not (work / 'business-analysis.md').exists():
-            (work / 'business-analysis.md').write_text(analysis_markdown(analysis))
+            (work / 'business-analysis.md').write_text(analysis_markdown(analysis), encoding="utf-8")
         state.update(agent_calls=agent.calls + (refinement or {}).get('agent_calls', 0),
                      creation_agent_calls=agent.calls, target_evaluations=(refinement or {}).get('target_evaluations', 0),
                      cached_agent_calls=agent.cached_calls,

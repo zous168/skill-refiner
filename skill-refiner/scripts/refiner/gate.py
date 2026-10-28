@@ -7,6 +7,131 @@ from .common import RefinerError, digest, manifest, read_json
 from .stages import verify_stage_manifest
 
 
+def _verify_phase_history(state):
+    phases = state.get("phase_results")
+    expected_phase_statuses = ["not_started", "pending", "running", "passed", "failed", "error", "skipped", "reused"]
+    expected_gate_statuses = ["pending", "running", "passed", "not_passed"]
+    if (not isinstance(phases, dict)
+            or phases.get("schema_version") != "skill-refiner.phase-results/v1"
+            or phases.get("status_enums") != {"phase": expected_phase_statuses,
+                                               "plan_gate": expected_gate_statuses}):
+        raise RefinerError("Phase result state is missing or does not match the versioned status contract")
+    for name in ("plan_generation", "plan_self_check", "independent_review"):
+        entry = phases.get(name, {})
+        if entry.get("status") not in {"passed", "reused"}:
+            raise RefinerError(f"Plan phase {name} is not complete: {entry.get('status')!r}")
+        suites = entry.get("suites", {})
+        if any(suites.get(suite) not in {"passed", "reused"}
+               for suite in ("development", "acceptance")):
+            raise RefinerError(f"Plan phase {name} lacks passed development and acceptance evidence")
+    if phases.get("plan_gate", {}).get("status") != "passed":
+        raise RefinerError(f"Plan gate is not passed: {phases.get('plan_gate', {}).get('status')!r}")
+    evaluation = phases.get("skill_evaluation", {})
+    if evaluation.get("status") != "passed" or any(
+            evaluation.get("suites", {}).get(suite) != "passed"
+            for suite in ("baseline", "regression", "acceptance")):
+        raise RefinerError("Target Skill evaluation lacks passed baseline, regression and acceptance evidence")
+    if phases.get("final_verification", {}).get("status") not in {"running", "passed"}:
+        raise RefinerError("Final Refiner verification has not reached its machine gate")
+
+    history = state.get("phase_history")
+    if not isinstance(history, list):
+        raise RefinerError("Phase history is missing")
+    gate_passes = [row.get("sequence", index) for index, row in enumerate(history)
+                   if isinstance(row, dict) and row.get("phase") == "plan_gate"
+                   and row.get("status") == "passed"]
+    evaluations = [row.get("sequence", index) for index, row in enumerate(history)
+                   if isinstance(row, dict) and row.get("phase") == "skill_evaluation"
+                   and row.get("status") == "running"]
+    if not gate_passes or not evaluations or min(gate_passes) > min(evaluations):
+        raise RefinerError("Target Skill evaluation started without an earlier passed plan gate")
+
+
+def _verify_plan_control_artifacts(root, plans):
+    from .checks import validate_plan
+    from .common import PlanValidationError
+
+    for suite, plan in plans.items():
+        summary_path = _required_file(root, f"plan-controls/{suite}.json")
+        summary = read_json(summary_path)
+        if (summary.get("schema_version") != "skill-refiner.plan-controls/v1"
+                or summary.get("suite") != suite or summary.get("status") != "passed"
+                or summary.get("plan_sha256") != digest(plan)
+                or summary.get("plan_snapshot") != plan):
+            raise RefinerError(f"{suite} plan control summary does not bind to the frozen plan")
+
+        attempts_dir = root / "plan-controls" / "attempts"
+        attempts = []
+        if attempts_dir.is_dir():
+            for path in sorted(attempts_dir.glob(f"{suite}-*.json")):
+                attempt = read_json(path)
+                if (attempt.get("schema_version") != "skill-refiner.plan-controls/v1"
+                        or attempt.get("suite") != suite
+                        or not isinstance(attempt.get("attempt"), int)
+                        or attempt.get("plan_sha256") != digest(attempt.get("plan_snapshot"))):
+                    raise RefinerError(f"Malformed {suite} plan-control attempt evidence: {path.name}")
+                try:
+                    recomputed = validate_plan(attempt["plan_snapshot"], root, max_cases=30)
+                except PlanValidationError as exc:
+                    expected_status = exc.evidence.get("status")
+                    expected_cases = exc.evidence.get("case_control_results")
+                    expected_failures = exc.evidence.get("control_failures")
+                    expected_coverage = exc.evidence.get("coverage_failures")
+                else:
+                    expected_status = "passed"
+                    expected_cases = recomputed.get("case_control_results")
+                    expected_failures = []
+                    expected_coverage = []
+                if (attempt.get("status") != expected_status
+                        or digest(attempt.get("case_control_results")) != digest(expected_cases)
+                        or digest(attempt.get("control_failures")) != digest(expected_failures)
+                        or digest(attempt.get("coverage_failures")) != digest(expected_coverage)):
+                    raise RefinerError(f"{suite} plan-control evidence differs from the complete recomputed controls: {path.name}")
+                attempts.append(attempt)
+        latest_matching = [row for row in attempts
+                           if row.get("plan_sha256") == digest(plan) and row.get("status") == "passed"]
+        if not latest_matching:
+            raise RefinerError(f"{suite} plan has no passed full-control attempt evidence")
+        recomputed = validate_plan(plan, root, max_cases=30)
+        if digest(summary.get("case_control_results")) != digest(recomputed.get("case_control_results")):
+            raise RefinerError(f"{suite} current control summary differs from the full recomputed controls")
+
+
+def _verify_plan_review_artifacts(root, plans):
+    from .pipeline import validate_plan_review
+
+    for suite, plan in plans.items():
+        summary = read_json(_required_file(root, f"plan-reviews/{suite}.json"))
+        if (summary.get("schema_version") != "skill-refiner.plan-review/v1"
+                or summary.get("suite") != suite or summary.get("status") != "passed"
+                or summary.get("plan_sha256") != digest(plan)
+                or summary.get("plan_snapshot") != plan
+                or not isinstance(summary.get("review"), dict)
+                or summary["review"].get("approved") is not True):
+            raise RefinerError(f"{suite} independent review does not bind to the frozen plan")
+        validate_plan_review(summary["review"], plan)
+
+        attempts_dir = root / "plan-reviews" / "attempts"
+        attempts = []
+        if attempts_dir.is_dir():
+            for path in sorted(attempts_dir.glob(f"{suite}-*.json")):
+                row = read_json(path)
+                if (row.get("schema_version") != "skill-refiner.plan-review/v1"
+                        or row.get("suite") != suite
+                        or not isinstance(row.get("attempt"), int)
+                        or row.get("plan_sha256") != digest(row.get("plan_snapshot"))
+                        or not isinstance(row.get("review"), dict)):
+                    raise RefinerError(f"Malformed {suite} independent-review attempt evidence: {path.name}")
+                validate_plan_review(row["review"], row["plan_snapshot"])
+                expected_status = "passed" if row["review"].get("approved") else "rejected"
+                if row.get("status") != expected_status:
+                    raise RefinerError(f"{suite} independent-review attempt status differs from its response: {path.name}")
+                attempts.append(row)
+        if not any(row.get("plan_sha256") == digest(plan)
+                   and row.get("status") == "passed" for row in attempts):
+            raise RefinerError(f"{suite} plan has no persisted approved independent review")
+
+
 def _required_file(root: Path, relative: str) -> Path:
     path = root / relative
     if not path.is_file():
@@ -92,6 +217,9 @@ def _verify_pipeline(root: Path, *, expected_status: set[str]) -> dict:
         raise RefinerError("Acceptance plan contains no executable cases")
     if acceptance.get("coverage_gaps") or plan.get("coverage_gaps"):
         raise RefinerError("A completed run cannot contain unresolved coverage gaps")
+    _verify_phase_history(state)
+    _verify_plan_control_artifacts(root, {"development": plan, "acceptance": acceptance})
+    _verify_plan_review_artifacts(root, {"development": plan, "acceptance": acceptance})
 
     source = Path(state.get("source", "")).resolve()
     original = root / "original" / source.name

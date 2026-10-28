@@ -52,7 +52,7 @@ def main():
                   "Do not substitute a project checkout, global installation, or another discovered copy. "
                   "The task workspace is " + str(cwd.resolve()) + ". Task input/output paths are relative "
                   "to that workspace unless the task specifies otherwise.\nInstalled Skill files:\n")
-        prompt += json.dumps([{"path": str(s.resolve()), "content": s.read_text()} for s in skills])
+        prompt += json.dumps([{"path": str(s.resolve()), "content": s.read_text(encoding="utf-8")} for s in skills])
         prompt += "\nTask messages:\n" + json.dumps(request["messages"], ensure_ascii=False)
         if helpers:
             prompt += (

@@ -46,7 +46,7 @@ def run(args):
         for phase, cases in (("regression", plan["cases"]), ("acceptance", acceptance["cases"])):
             result = backend.evaluate(target, cases, output / phase)
             results[phase] = result
-            lines += ["## " + phase, "", (output / phase / "comparison.md").read_text(), ""]
+            lines += ["## " + phase, "", (output / phase / "comparison.md").read_text(encoding="utf-8"), ""]
         if manifest(target) != before:
             raise RefinerError("Comparison target changed during evaluation")
         if any(c.get('helpers') for c in plan['cases'] + acceptance['cases']) and lock.get('python_probe_sha256') != hashlib.sha256(helper.read_bytes()).hexdigest():
@@ -60,6 +60,6 @@ def run(args):
         state["elapsed_seconds"] = round(time.monotonic() - started, 2)
         write_json(output / "state.json", state)
         lines.insert(2, "Status: **" + state["status"] + "**")
-        (output / "report.md").write_text("\n".join(lines) + "\n")
+    (output / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("Report: " + str(output / "report.md"))
     return 0 if state["status"] == "passed" else 2

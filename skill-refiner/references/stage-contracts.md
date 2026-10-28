@@ -41,7 +41,11 @@ workspace with `run --resume-from RUN_DIRECTORY`; plan calls are reused. Creatio
 the same checkpoint through `create --plan-only` and resumes with `create --resume-run`.
 `work-plan.md` is the frozen, human-readable design and test checklist. Execution
 state belongs in `state.json`, `stages.json` and immutable stage evidence. The CLI
-emits structured JSON stage/evaluation events, including bounded heartbeats. When
+emits structured JSON stage/phase/evaluation events, controller Agent stream events,
+and periodic heartbeats. Controller Agent calls are not killed when the run-wide
+wall-clock budget expires: they continue until their terminal result or explicit
+cancellation. The run budget is checked before the next budgeted stage. Per-case
+executor timeouts and round/evaluation limits still bound target testing. When
 `large-task-tracking` owns the task, its parent snapshot/runtime is the sole user-visible
 progress record; it reads these internal files and events without copying long logs.
 Final verification remains bound to stage artifacts and hashes.
@@ -72,8 +76,13 @@ response hash when one was returned, plus relative paths to its `request.json`,
 `transmission.txt` and (on success) `response.json`. `transmission.txt` preserves the exact bytes
 sent to the backend (the JSON request for command adapters, the rendered prompt for
 managed model adapters). Structured outputs are validated against the role's JSON
-schema before the next stage can consume them. Human-readable reports use Markdown;
-patches use unified diff; logs and backend-native evidence retain their source format.
+schema before the next stage can consume them. CLI Agent events are forwarded as
+structured `agent_stream` records while the call remains active; a terminal JSON
+result is saved before the next role or stage starts. When a backend does not expose
+partial output, it emits elapsed-time heartbeats and returns its final response. The
+controller does not infer completion from a short wait or heartbeat count. Human-readable
+reports use Markdown; patches use unified diff; logs and backend-native evidence retain
+their source format.
 
 The default maximum serialized prompt is 350,000 UTF-8 bytes. A controller role's
 backend profile may set `max_request_bytes` from 16,384 to 10,000,000, based on a
@@ -90,7 +99,7 @@ evidence remain in the run directory even when a role receives a bounded excerpt
 | Creation: inputs | User description, supplied requirements, auto-discovered project standards, and optional additional standards | `inputs.json` (JSON), `inputs/*.md` (UTF-8 Markdown/text) | Inputs frozen and hashed in the business contract |
 | Creation: analysis | Frozen business inputs | `analysis.json`, `analysis-review.json` (JSON), `business-analysis.md` (Markdown), `business.lock.json` (JSON) | Requirements cite user sources; workflow and normal/boundary/error applicability reviewed; material questions pause creation |
 | Creation: first draft | Approved analysis and business lock | `drafts/` (Skill source files), `draft-manifest.json` (path-to-SHA-256 JSON) | Draft paths and static authoring checks pass |
-| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract | `test-plan.json`, `acceptance-plan.json`, `oracle.lock.json` (JSON) | Independent review approves executable coverage; acceptance uses fresh fixtures; plans and source hashes lock |
+| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract and the actual plan schema | `test-plan.json`, `acceptance-plan.json`, `plan-controls/{development,acceptance}.json`, `plan-reviews/{development,acceptance}.json`, `oracle.lock.json` (JSON) | Schema v2 validates every required field and enum; full positive/negative/auxiliary controls run; assets and requirement sources are audited; each suite has an independent review; only then can the plan gate pass |
 | Refinement: baseline | Locked development plan and original Skill snapshot | `baseline/summary.json`, `baseline/standards.json` (JSON), backend logs/evidence | All configured engines return observed results; environment errors stop repair |
 | Repair | Failed-case results (including immutable per-attempt acceptance summaries after held-out failure), material standards findings, frozen requirements, prioritized source excerpts | `iterations/round-N/changes.json` (JSON), candidate Skill files, call request/response manifests | Each changed file cites a failed case or finding; protected tests and oracles cannot be edited |
 | Regression | Candidate, same frozen development suite, original passing-case set | `iterations/round-N/regression/summary.json`, `standards.json`, engine comparisons (JSON/Markdown) | No previously passing case regresses; each engine is judged separately |

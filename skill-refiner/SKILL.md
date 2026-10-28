@@ -140,9 +140,11 @@ Do not describe a test suite as unbounded: defaults are two repair rounds, 20 mi
 for refinement or 30 minutes for creation, and 40/80 case-executor evaluations
 respectively. Hard limits are three repair rounds, 60 minutes, 128 agent calls, 200
 case-executor evaluations, four plan attempts, and 30 cases in either suite. These
-budgets cover the full run; creation does not reset them for nested refinement. Stop
-when any budget is exhausted, save the current stage and evidence, and report the
-precise remaining checklist to the task owner.
+budgets cover the full run; creation does not reset them for nested refinement. The
+wall-clock budget is checked between completed controller Agent calls; never kill an
+active controller call because its timer expired. Stream available Agent events and
+wait for its terminal result, then save evidence and stop before starting another
+budgeted stage if needed. Case-executor timeout remains a per-evaluation failure limit.
 
 After it exits, invoke the `verify` command on that run directory. Only a successful machine-readable
 `status=verified` permits you to describe the candidate as complete. A failed or
@@ -203,9 +205,11 @@ preserved; only `created` means creation passed all gates. Use
    from observed passes.
 4. Follow emitted stages and inspect `work-plan.md`, `state.json`, `stages.json`,
     `report.md` and upstream logs. The first is the frozen design/test plan; the next
-    two are internal resume and evidence records. Long test processes emit structured
-    heartbeats with elapsed time, remaining timeout, executor and evaluation count;
-    the large-task owner uses them for user-visible progress.
+     two are internal resume and evidence records. Controller Agent calls emit any
+     available streamed events and periodic elapsed-time heartbeats until the actual
+     terminal result. Case-executor heartbeats include elapsed time, remaining case
+     budget, executor and evaluation count. The large-task owner uses these events and
+     persisted phase evidence for user-visible progress.
 
 5. Verify the completed run with the same installed launcher:
 
@@ -225,9 +229,14 @@ preserved; only `created` means creation passed all gates. Use
 
 - Required behaviors map to executable cases. Read referenced resources and actual
   scripts; a description alone is insufficient for comprehensive planning.
-- The planner justifies expected results independently of implementation mistakes.
-  A separate review rejects weak or circular assertions. Known-good and known-bad
-  response controls exercise graders before model runs.
+- The planner reads the versioned JSON schema before generation. Each frozen case
+  includes its complete scenario/expected-result contract, `helpers` array, source and
+  asset audit, stable assertion IDs, paraphrase positives and targeted negatives.
+  Before evaluating the target Skill, the controller runs every positive against every
+  response assertion and every negative against its declared assertion while requiring
+  all other assertions to pass. It persists those results and the independent review,
+  and `verify` recomputes them from the frozen plans. A plan-gate failure is reported as
+  `plan_not_passed`; target Skill evaluation remains `not_started`.
 - Review each case's fixture instructions against the execution contract: installed
   Skill source stays unchanged; repairs produce separate workspace candidates.
   Conflicting repair-on-failure directions must be resolved before cases are frozen.

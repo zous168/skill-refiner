@@ -93,7 +93,7 @@ def main():
               'write_events':writes,'network_events':network,'subprocess_events':subprocesses,
               'observation_scope':'Python audit events during runpy execution; not OS isolation'}
     evidence.parent.mkdir(parents=True, exist_ok=True)
-    evidence.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
+    evidence.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n', encoding="utf-8")
     # The observer transport succeeds even when business code fails. The grader
     # must assert evidence.exit_code; never mistake the observer's code for it.
     sys.stdout.write(stdout.getvalue())

@@ -11,7 +11,7 @@ import time
 
 from .agent import Agent
 from .checks import validate_plan
-from .common import (Cancelled, RefinerError, digest, inventory, manifest, read_json, relative_path,
+from .common import (Cancelled, PlanControlError, PlanGateError, PlanValidationError, RefinerError, digest, inventory, manifest, read_json, relative_path,
                      snapshot, write_json)
 from .schemas import PLAN, PLAN_REVIEW, REPAIR, REVIEW
 from .evidence import repair_evidence
@@ -21,6 +21,80 @@ from .profiles import load_config
 from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
 from .plan import write_test_scenarios, write_work_plan
+
+
+PHASE_STATUS_ENUM = ("not_started", "pending", "running", "passed", "failed", "error", "skipped", "reused")
+PLAN_GATE_STATUS_ENUM = ("pending", "running", "passed", "not_passed")
+
+
+def initial_phase_results():
+    plan_suites = {"development": "pending", "acceptance": "pending"}
+    return {
+        "schema_version": "skill-refiner.phase-results/v1",
+        "status_enums": {"phase": list(PHASE_STATUS_ENUM), "plan_gate": list(PLAN_GATE_STATUS_ENUM)},
+        "plan_generation": {"status": "pending", "suites": dict(plan_suites)},
+        "plan_self_check": {"status": "pending", "suites": dict(plan_suites)},
+        "independent_review": {"status": "pending", "suites": dict(plan_suites)},
+        "plan_gate": {"status": "pending", "evidence": []},
+        "skill_evaluation": {"status": "not_started", "suites": {
+            "baseline": "not_started", "regression": "not_started", "acceptance": "not_started"}},
+        "final_verification": {"status": "not_started"},
+    }
+
+
+def set_phase_result(state, name, status, *, suite=None, **details):
+    if name not in state.setdefault("phase_results", initial_phase_results()):
+        raise RefinerError(f"Unknown phase result: {name}")
+    if name == "plan_gate":
+        if status not in PLAN_GATE_STATUS_ENUM:
+            raise RefinerError(f"Invalid plan-gate status: {status}")
+    elif status not in PHASE_STATUS_ENUM:
+        raise RefinerError(f"Invalid phase status: {status}")
+    entry = state["phase_results"][name]
+    if suite is not None:
+        if suite not in entry.get("suites", {}):
+            raise RefinerError(f"Unknown {name} suite: {suite}")
+        if status not in PHASE_STATUS_ENUM:
+            raise RefinerError(f"Invalid {name} suite status: {status}")
+        entry["suites"][suite] = status
+        if name in {"plan_generation", "plan_self_check", "independent_review"}:
+            statuses = list(entry["suites"].values())
+            if any(value == "error" for value in statuses):
+                entry["status"] = "error"
+            elif any(value == "failed" for value in statuses):
+                entry["status"] = "failed"
+            elif any(value == "running" for value in statuses):
+                entry["status"] = "running"
+            elif all(value in {"passed", "reused"} for value in statuses):
+                entry["status"] = "reused" if all(value == "reused" for value in statuses) else "passed"
+            else:
+                entry["status"] = "pending"
+    else:
+        entry["status"] = status
+    if details:
+        entry.setdefault("history", []).append({"status": status, **details})
+        entry["history"] = entry["history"][-100:]
+    state.setdefault("phase_history", []).append({
+        "sequence": len(state["phase_history"]) + 1,
+        "phase": name, "status": status, "suite": suite,
+        "at": datetime.now(timezone.utc).isoformat(), **details,
+    })
+    state["phase_history"] = state["phase_history"][-1000:]
+    return entry
+
+
+def require_plan_gate(state):
+    phases = state.get("phase_results", {})
+    for name in ("plan_generation", "plan_self_check", "independent_review"):
+        entry = phases.get(name, {})
+        allowed = {"passed", "reused"} if name == "plan_generation" else {"passed"}
+        if entry.get("status") not in allowed or any(
+                entry.get("suites", {}).get(suite) not in allowed
+                for suite in ("development", "acceptance")):
+            raise PlanGateError(f"Target Skill evaluation blocked because {name} is incomplete")
+    status = phases.get("plan_gate", {}).get("status")
+    if status != "passed":
+        raise PlanGateError(f"Target Skill evaluation blocked because plan gate status is {status!r}")
 
 
 HELPER_EXECUTION_AUDIT = """For every Python helper supplied in case files, inspect its executable source line by line and
@@ -221,11 +295,35 @@ Each case must include human-readable scenario and expected_outcome fields separ
 scenario states the user situation and inputs at a high level; expected_outcome states what observable
 success looks like before machine checks; prompt is only the executor task wording. Do not duplicate the
 full prompt into scenario or expected_outcome."""
+PLANNING += """
+
+Schema-first JSON contract: read the supplied response_schema before planning. Return exactly one JSON
+object matching it, without Markdown fences or prose. Use schema_version=skill-refiner.plan/v2. Every case
+must include every required field; always emit helpers as an array, using [] when no helper is needed.
+Use only the schema's kind and check-type enums. Give every check a unique stable id. Include an asset_audit
+with every fixture/helper path marked required and available, all linked requirement source_refs, a valid
+status (ready or not_required), and a concrete basis. Include positive_controls with stable IDs; all good
+wordings must be distinct. Include negative_controls for every response assertion; each declares the exact
+assertion_id it contradicts and a rationale. A negative control is valid only when that target assertion
+fails and every other response assertion passes. Keep good_response equal to the first positive control.
+When validation or review returns feedback, preserve every prior requirement ID and case ID; edit the
+targeted case in place and keep all unrelated cases and assets. Never return only the examples named by
+the latest feedback."""
+PLANNING += """
+
+For a user-facing claim that has several valid phrasings, encode the equivalent phrases as a structured
+contains_any check (or use a reviewed regex alternation when structure is not applicable). For prohibited
+misclassification claims, enumerate materially different wording in not_contains_any or a justified regex
+alternation. Include different positive paraphrases and negative responses in the controls. Do not use a
+single narrow phrase such as only '不需要补集数' when '无需补集数' has the same meaning, and do not rely on
+one not_contains phrase to detect every wording of an operator's incorrect judgment. Controls must show that
+the assertion distinguishes business meaning: vary the target behavior while keeping unrelated fields correct."""
 
 PLAN_REVIEW_CASE_BOOLS = (
     "installed_source_unchanged", "fixture_contract_consistent", "response_contract_consistent",
     "trace_checks_observable", "scenario_consistent", "requirement_trace_consistent",
-    "expected_outcome_consistent", "machine_checks_consistent",
+    "expected_outcome_consistent", "machine_checks_consistent", "matrix_complete",
+    "asset_audit_consistent", "positive_controls_validated", "negative_controls_targeted",
 )
 
 
@@ -246,11 +344,17 @@ def validate_plan_review(review, plan):
         raise RefinerError("Approved plan review contains a conflicting execution contract")
 
 
-def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2):
+def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
+              *, phase_callback=None, suite="development"):
     feedback = []
     previous_plan = None
+    def phase(name, status, **detail):
+        if phase_callback:
+            phase_callback(name, status, suite=suite, **detail)
     for attempt in range(max_attempts):
-        plan = agent.ask(role, PLANNING + f" Generate 2 to {max_cases} cases, never more. " +
+        phase("plan_generation", "running", attempt=attempt + 1)
+        try:
+            plan = agent.ask(role, PLANNING + f" Generate 2 to {max_cases} cases, never more. " +
                          ("Copy the supplied contract requirement list exactly, preserving IDs and all properties. "
                           if "contract" in context else "") +
                          ("Include at least one executable case of EACH required_case_kinds category: "
@@ -261,21 +365,110 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2):
                           if role == "acceptance-plan" else ""),
                          {**context, "validation_feedback": feedback, **(
                              {'previous_plan': previous_plan} if previous_plan else {})}, PLAN)
-        previous_plan = plan
+        except RefinerError as exc:
+            invalid_contract = "invalid contract" in str(exc).lower()
+            phase("plan_generation", "failed" if invalid_contract else "error",
+                  attempt=attempt + 1, reason=str(exc))
+            if invalid_contract:
+                raise PlanGateError(f"Plan generation did not satisfy the JSON schema: {exc}") from exc
+            raise
+        current_plan = plan
+        phase("plan_generation", "passed", attempt=attempt + 1,
+              case_ids=[case.get("id") for case in plan.get("cases", []) if isinstance(case, dict)])
+        phase("plan_self_check", "running", attempt=attempt + 1)
+        revision_failures = []
         try:
-            validate_plan(plan, work, max_cases)
+            if previous_plan:
+                previous_requirements = {row["id"] for row in previous_plan.get("requirements", [])
+                                         if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                current_requirements = {row["id"] for row in plan.get("requirements", [])
+                                        if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                previous_cases = {row["id"] for row in previous_plan.get("cases", [])
+                                  if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                current_cases = {row["id"] for row in plan.get("cases", [])
+                                 if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                missing_requirements = sorted(previous_requirements - current_requirements)
+                missing_cases = sorted(previous_cases - current_cases)
+                if missing_requirements or missing_cases:
+                    revision_failures.append({
+                        "kind": "dropped_frozen_matrix_entries",
+                        "missing_requirement_ids": missing_requirements,
+                        "missing_case_ids": missing_cases,
+                        "expected_condition": "preserve every prior requirement and case ID",
+                        "actual_value": {"requirement_ids": sorted(current_requirements),
+                                         "case_ids": sorted(current_cases)}})
+                if plan.get("requirements") != previous_plan.get("requirements"):
+                    revision_failures.append({
+                        "kind": "changed_frozen_requirement_contract",
+                        "field_path": "requirements", "expected_condition": "byte-for-byte stable requirement rows",
+                        "actual_value": plan.get("requirements")})
+                feedback_text = "\n".join(feedback)
+                targeted_case_ids = {
+                    case_id for case_id in previous_cases
+                    if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(case_id)}(?![A-Za-z0-9_-])",
+                                 feedback_text, flags=re.IGNORECASE)
+                }
+                previous_by_id = {row["id"]: row for row in previous_plan.get("cases", [])
+                                  if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                current_by_id = {row["id"]: row for row in plan.get("cases", [])
+                                 if isinstance(row, dict) and isinstance(row.get("id"), str)}
+                changed_unrelated = sorted(
+                    case_id for case_id, old_case in previous_by_id.items()
+                    if case_id in current_by_id and case_id not in targeted_case_ids
+                    and current_by_id[case_id] != old_case
+                )
+                if changed_unrelated:
+                    revision_failures.append({
+                        "kind": "modified_cases_outside_feedback_scope",
+                        "field_path": "cases[]", "targeted_case_ids": sorted(targeted_case_ids),
+                        "expected_condition": "all unmentioned prior cases remain unchanged",
+                        "actual_value": changed_unrelated})
             if "contract" in context and plan["requirements"] != context["contract"]:
-                raise RefinerError("Planner changed the frozen capability contract")
+                revision_failures.append({"kind": "changed_frozen_capability_contract",
+                                          "field_path": "requirements",
+                                          "expected_condition": context["contract"],
+                                          "actual_value": plan["requirements"]})
             missing_kinds = set(context.get("required_case_kinds", [])) - {c["kind"] for c in plan["cases"]}
             if missing_kinds:
-                raise RefinerError("Missing required scenario categories: " + ", ".join(sorted(missing_kinds)))
+                revision_failures.append({"kind": "missing_required_scenario_categories",
+                                          "field_path": "cases[].kind",
+                                          "expected_condition": sorted(context.get("required_case_kinds", [])),
+                                          "actual_value": sorted({c["kind"] for c in plan["cases"]})})
+            try:
+                control_results = validate_plan(plan, work, max_cases)
+            except PlanValidationError as exc:
+                failed_evidence = {**exc.evidence, "suite": suite, "attempt": attempt + 1,
+                                   "plan_sha256": digest(plan), "plan_snapshot": plan,
+                                   "revision_failures": revision_failures}
+                write_json(Path(work) / "plan-controls" / "attempts" /
+                           f"{suite}-{attempt + 1:02}.json", failed_evidence)
+                write_json(Path(work) / "plan-controls" / f"{suite}.json", failed_evidence)
+                raise
+            control_evidence = {"schema_version": "skill-refiner.plan-controls/v1", "suite": suite,
+                                "attempt": attempt + 1, "status": "passed", "plan_sha256": digest(plan),
+                                "plan_snapshot": plan,
+                                "case_control_results": control_results["case_control_results"],
+                                "control_failures": [], "coverage_failures": [],
+                                "revision_failures": revision_failures}
+            write_json(Path(work) / "plan-controls" / "attempts" /
+                       f"{suite}-{attempt + 1:02}.json", control_evidence)
+            write_json(Path(work) / "plan-controls" / f"{suite}.json", control_evidence)
+            if revision_failures:
+                raise RefinerError("Plan revision self-check failed after full controls: "
+                                   + json.dumps(revision_failures, ensure_ascii=False))
         except Exception as exc:
+            phase("plan_self_check", "failed", attempt=attempt + 1, reason=str(exc))
             # One bounded correction for malformed coverage/oracles; never silently accept a bad suite.
             if attempt + 1 >= max_attempts:
-                raise RefinerError(f"Invalid autonomous test plan: {exc}") from exc
+                raise PlanGateError(f"Invalid autonomous test plan: {exc}") from exc
             feedback.append(str(exc))
+            previous_plan = current_plan
             continue
-        review = agent.ask("plan-review", "Independently review the test plan against requirements and "
+        phase("plan_self_check", "passed", attempt=attempt + 1,
+              controls=len(control_results.get("case_control_results", [])))
+        phase("independent_review", "running", attempt=attempt + 1)
+        try:
+            review = agent.ask("plan-review", "Independently review the test plan against requirements and "
                            "the source Skill. Reject superficial assertions, circular implementation-derived "
                            "oracles, missing critical coverage, answer leakage in prompts, impossible fixtures, "
                            "and claims that require unprovided binary/context files. No stylistic nitpicks. "
@@ -361,23 +554,87 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2):
                            "requirement_trace_consistent, expected_outcome_consistent and machine_checks_consistent "
                            "to true only when the frozen scenario and expected_outcome align with linked requirement "
                            "IDs and their sources and every check's expected value actually verifies that outcome. "
+                           "Also inspect asset_audit_consistent, matrix_complete, positive_controls_validated and "
+                           "negative_controls_targeted against the supplied machine control results. Every positive "
+                           "control must pass every response assertion. Every negative control must fail exactly its "
+                           "declared assertion_id while all other response assertions pass. Reject a control that "
+                           "fails only because a status/state field differs while its target business-meaning "
+                           "assertion still passes. Confirm every previous case ID remains in a revision. "
                            "Reject approval when any case is unassessed, duplicated, unknown, or marked false. "
                            + HELPER_EXECUTION_AUDIT + " "
                            + CONVERSATIONAL_JSON_AUDIT + " " + INPUT_BOUNDARY_AUDIT,
-                           {"context": context, "plan": plan}, PLAN_REVIEW)
+                           {"context": context, "plan": plan, "control_results": control_results,
+                            "previous_case_ids": sorted({row["id"] for row in previous_plan.get("cases", [])})
+                           if previous_plan else []}, PLAN_REVIEW)
+        except RefinerError as exc:
+            invalid_contract = "invalid contract" in str(exc).lower()
+            phase("independent_review", "failed" if invalid_contract else "error",
+                  attempt=attempt + 1, reason=str(exc))
+            if invalid_contract:
+                raise PlanGateError(f"Independent review did not satisfy its JSON schema: {exc}") from exc
+            raise
+        _persist_plan_review(work, suite, attempt + 1, plan, review)
         try:
             validate_plan_review(review, plan)
         except RefinerError as exc:
+            phase("independent_review", "failed", attempt=attempt + 1, reason=str(exc))
             if attempt + 1 >= max_attempts:
-                raise
+                raise PlanGateError(f"Independent test review did not pass its schema/coverage gate: {exc}") from exc
             feedback.append(str(exc))
             continue
         if review["approved"]:
+            phase("independent_review", "passed", attempt=attempt + 1,
+                  assessed_cases=len(review["case_contracts"]))
+            _persist_plan_review(work, suite, attempt + 1, plan, review)
             return plan
+        phase("independent_review", "failed", attempt=attempt + 1, issues=review["issues"])
         if attempt + 1 >= max_attempts:
-            raise RefinerError("Independent test review rejected the plan: " + "; ".join(review["issues"]))
+            raise PlanGateError("Independent test review rejected the plan: " + "; ".join(review["issues"]))
         feedback.extend(review["issues"])
+        previous_plan = current_plan
     raise RefinerError("Unable to construct a valid plan")
+
+
+def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback, suite):
+    def phase(status, **detail):
+        if phase_callback:
+            phase_callback("independent_review", status, suite=suite, **detail)
+
+    phase("running", case_ids=[case["id"] for case in plan["cases"]])
+    try:
+        review = agent.ask("plan-review",
+                           "Independently review this already-frozen Skill test plan against the source "
+                           "requirements, scenarios, expected outcomes, assets, response assertions and "
+                           "the complete positive/negative/auxiliary control results. Verify every case "
+                           "exactly once. Every response assertion must express the linked business meaning; "
+                           "every positive paraphrase must pass all response assertions; each negative control "
+                           "must fail its declared assertion and pass every other assertion. A status-field "
+                           "failure cannot substitute for detecting the intended business error. Check that all "
+                           "available assets are supported by the original inventory or declared fixtures. "
+                           "Do not narrow checks to a single wording when equivalent phrases meet the contract. "
+                           "Return exactly the supplied PLAN_REVIEW JSON schema. Cite case and assertion IDs "
+                           "in each issue. Approve only if all flags are true and the complete plan is useful.",
+                           {"context": context, "plan": plan, "control_results": control_results,
+                            "previous_case_ids": [case["id"] for case in plan["cases"]]}, PLAN_REVIEW)
+        _persist_plan_review(agent.work, suite, 1, plan, review)
+        validate_plan_review(review, plan)
+    except RefinerError as exc:
+        phase("failed", reason=str(exc))
+        raise PlanGateError(f"Independent review did not pass for reused {suite} plan: {exc}") from exc
+    if not review["approved"]:
+        phase("failed", issues=review["issues"])
+        raise PlanGateError(f"Independent review rejected reused {suite} plan: " + "; ".join(review["issues"]))
+    phase("passed", assessed_cases=len(review["case_contracts"]), reused=True)
+    return review
+
+
+def _persist_plan_review(work, suite, attempt, plan, review):
+    record = {"schema_version": "skill-refiner.plan-review/v1", "suite": suite,
+              "attempt": attempt, "status": "passed" if review.get("approved") else "rejected",
+              "plan_sha256": digest(plan), "plan_snapshot": plan, "review": review}
+    write_json(Path(work) / "plan-reviews" / "attempts" / f"{suite}-{attempt:02}.json", record)
+    if review.get("approved"):
+        write_json(Path(work) / "plan-reviews" / f"{suite}.json", record)
 
 
 def validate_changes(candidate, response, evidence_ids):
@@ -397,7 +654,7 @@ def validate_changes(candidate, response, evidence_ids):
             elif isinstance(value, list):
                 for item in value:
                     collect(item)
-        collect(yaml.safe_load(config.read_text()))
+        collect(yaml.safe_load(config.read_text(encoding="utf-8")))
     changes = response["changes"]
     if len(changes) > 20 or sum(len(c["content"].encode()) for c in changes) > 500_000:
         raise RefinerError("Repair exceeds bounded patch size")
@@ -660,15 +917,16 @@ def run(args):
         context = {"files": inventory(original, max_bytes=300_000), "requirements": [], "standards": [AUTHORING]}
         context.update(getattr(args, "creation_context", {}))
         for path in args.spec:
-            context["requirements"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
+            context["requirements"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text(encoding="utf-8")})
         for path in standard_paths:
-            context["standards"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text()})
+            context["standards"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text(encoding="utf-8")})
         write_json(work / "inputs.json", context)
     state = {"status": "planning", "source": str(source), "workspace": str(work),
              "rounds": [], "limitations": ["Uses local environment.type=none; no container isolation",
              "Agent role separation uses fresh contexts; it is not an OS-level read barrier",
              "Declarative response/file checks only; no automatic domain-specific executable graders",
-             "Small acceptance sets provide observed evidence, not statistical reliability proof"]}
+             "Small acceptance sets provide observed evidence, not statistical reliability proof"],
+             "phase_results": initial_phase_results()}
     if resume_from:
         state = previous_state
         state.setdefault("rounds", [])
@@ -685,6 +943,7 @@ def run(args):
             state.pop(key, None)
     else:
         write_json(work / "state.json", state)
+    state.setdefault("phase_results", initial_phase_results())
     agent = Agent(work, args.agent_command, args.timeout, config=config)
     agent.max_calls = args.max_agent_calls
     engine_config = read_json(args.engine_config) if args.engine_config else None
@@ -742,9 +1001,18 @@ def run(args):
             raise RefinerError("Resume Python observer differs from the frozen run; start a new run")
 
     def evaluate(target, cases, run_dir, *, selected=None, existing=True):
+        require_plan_gate(state)
         run_dir = Path(run_dir)
         suite_name = run_dir.relative_to(work).as_posix()
         suite = "acceptance" if "acceptance" in Path(suite_name).parts else "development"
+        evaluation_phase = ("acceptance" if suite == "acceptance" else
+                            "baseline" if Path(suite_name).parts[0] == "baseline" else "regression")
+        set_phase_result(state, "skill_evaluation", "running", suite=evaluation_phase,
+                         path=suite_name)
+        state["phase_results"]["skill_evaluation"]["status"] = "running"
+        write_json(work / "state.json", state)
+        print(json.dumps({"stage": "phase", "phase": "skill_evaluation",
+                          "status": "running", "suite": evaluation_phase}, ensure_ascii=False), flush=True)
         selected_ids = sorted(c["id"] for c in cases if selected is None or c["id"] in selected)
         cache_identity = {"target_manifest": manifest(target), "cases_sha256": digest(cases),
                           "selected": sorted(selected) if selected is not None else None,
@@ -779,6 +1047,9 @@ def run(args):
                     state["target_evaluations"] = backend.evaluations
                     state["agent_calls"] = agent.calls
                     state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+                    set_phase_result(state, "skill_evaluation",
+                                     "passed" if saved_result.get("passed") else "failed",
+                                     suite=evaluation_phase, cache_hit=True)
                     write_json(work / "state.json", state)
                     return saved_result
             except (OSError, ValueError, TypeError, AttributeError):
@@ -824,6 +1095,9 @@ def run(args):
             state["active_evaluation"]["error"] = str(exc)
             state["target_evaluations"] = backend.evaluations
             state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+            set_phase_result(state, "skill_evaluation", "error", suite=evaluation_phase,
+                             error=str(exc))
+            state["phase_results"]["skill_evaluation"]["status"] = "error"
             write_json(work / "state.json", state)
             raise
         write_json(summary_path, result)
@@ -841,6 +1115,10 @@ def run(args):
         state["target_evaluations"] = backend.evaluations
         state["agent_calls"] = agent.calls
         state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+        set_phase_result(state, "skill_evaluation",
+                         "passed" if result.get("passed") else "failed",
+                         suite=evaluation_phase, passed=result.get("passed"),
+                         cases=len(result.get("cases", [])), cache_hit=False)
         write_json(work / "state.json", state)
         return result
 
@@ -857,6 +1135,14 @@ def run(args):
         write_json(work / "state.json", state)
         print(json.dumps({"status": status, "elapsed_seconds": state["elapsed_seconds"],
                           "max_seconds": args.max_seconds, **data}, ensure_ascii=False), flush=True)
+
+    def phase_progress(name, status, **data):
+        suite = data.pop("suite", None)
+        set_phase_result(state, name, status, suite=suite, **data)
+        state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
+        write_json(work / "state.json", state)
+        print(json.dumps({"stage": "phase", "phase": name, "status": status,
+                          "suite": suite, **data}, ensure_ascii=False), flush=True)
 
     def budget():
         if elapsed_before + time.monotonic() - started > args.max_seconds or agent.calls > args.max_agent_calls:
@@ -910,6 +1196,7 @@ def run(args):
             write_json(work / "state.json", state)
         backend.progress_callback = evaluation_progress
         event("planning")
+        phase_progress("plan_gate", "running")
         reuse = getattr(args, "reuse_plan", None)
         frozen_plan = False
         if (resume_from and all((work / name).is_file() for name in
@@ -923,8 +1210,19 @@ def run(args):
                     or prior_lock.get("checker_sha256") != checker_hash
                     or prior_lock.get("python_probe_sha256") != helper_hash):
                 raise RefinerError("Frozen plans or oracle lock changed; refusing to resume")
-            validate_plan(plan, work, args.max_cases)
-            validate_plan(acceptance, work, args.acceptance_cases)
+            for suite, frozen in (("development", plan), ("acceptance", acceptance)):
+                control_path = work / "plan-controls" / f"{suite}.json"
+                if not control_path.is_file():
+                    raise PlanGateError(f"Cannot resume: frozen {suite} plan has no completed control evidence")
+                control_record = read_json(control_path)
+                if (control_record.get("status") != "passed"
+                        or control_record.get("plan_sha256") != digest(frozen)
+                        or control_record.get("plan_snapshot") != frozen):
+                    raise PlanGateError(f"Cannot resume: frozen {suite} plan control checkpoint does not match")
+                for phase_name in ("plan_generation", "plan_self_check", "independent_review"):
+                    phase_entry = state.get("phase_results", {}).get(phase_name, {})
+                    if phase_entry.get("suites", {}).get(suite) not in {"passed", "reused"}:
+                        raise PlanGateError(f"Cannot resume: {suite} {phase_name} checkpoint is incomplete")
             frozen_plan = True
         elif reuse:
             previous = Path(reuse).resolve()
@@ -938,29 +1236,66 @@ def run(args):
                 raise RefinerError("Cached plan lock mismatch")
             if any(c.get('helpers') for c in plan['cases'] + acceptance['cases']) and prior_lock.get('python_probe_sha256') != helper_hash:
                 raise RefinerError('Cached Python observer hash mismatch')
-            validate_plan(plan, work, args.max_cases)
-            validate_plan(acceptance, work, args.acceptance_cases)
             state["plan_provenance"] = str(previous)
             state['plan_provenance_checker_sha256'] = prior_lock.get('checker_sha256')
+            for suite, frozen, limit, suite_context in (
+                    ("development", plan, args.max_cases, context),
+                    ("acceptance", acceptance, args.acceptance_cases,
+                     {**context, "contract": plan["requirements"]})):
+                phase_progress("plan_generation", "reused", suite=suite,
+                               source_run=str(previous), case_ids=[case["id"] for case in frozen["cases"]])
+                phase_progress("plan_self_check", "running", suite=suite, reused=True)
+                try:
+                    controls = validate_plan(frozen, work, limit)
+                except PlanValidationError as exc:
+                    failed_evidence = {**exc.evidence, "suite": suite, "attempt": 1,
+                                       "plan_sha256": digest(frozen), "plan_snapshot": frozen}
+                    write_json(work / "plan-controls" / "attempts" / f"{suite}-01.json", failed_evidence)
+                    write_json(work / "plan-controls" / f"{suite}.json", failed_evidence)
+                    phase_progress("plan_self_check", "failed", suite=suite, reused=True, reason=str(exc))
+                    raise PlanGateError(f"Reused {suite} plan failed its complete control suite: {exc}") from exc
+                control_evidence = {"schema_version": "skill-refiner.plan-controls/v1", "suite": suite,
+                                    "attempt": 1, "status": "passed", "plan_sha256": digest(frozen),
+                                    "plan_snapshot": frozen,
+                                    "case_control_results": controls["case_control_results"],
+                                    "control_failures": [], "coverage_failures": []}
+                write_json(work / "plan-controls" / "attempts" / f"{suite}-01.json", control_evidence)
+                write_json(work / "plan-controls" / f"{suite}.json", control_evidence)
+                phase_progress("plan_self_check", "passed", suite=suite, reused=True,
+                               controls=len(controls["case_control_results"]))
+                _review_frozen_plan(agent, frozen, suite_context, controls,
+                                    phase_callback=phase_progress, suite=suite)
         else:
-            plan = make_plan(agent, context, work, args.max_cases, max_attempts=getattr(args,'planning_attempts',2))
+            plan = make_plan(agent, context, work, args.max_cases,
+                             max_attempts=getattr(args, 'planning_attempts', 2),
+                             phase_callback=phase_progress, suite="development")
             budget()
             acceptance = make_plan(agent, {**context, "contract": plan["requirements"]}, work,
-                                   args.acceptance_cases, "acceptance-plan", max_attempts=getattr(args,'planning_attempts',2))
+                                   args.acceptance_cases, "acceptance-plan",
+                                   max_attempts=getattr(args, 'planning_attempts', 2),
+                                   phase_callback=phase_progress, suite="acceptance")
         if not frozen_plan:
             write_json(work / "test-plan.json", plan)
             write_json(work / "acceptance-plan.json", acceptance)
         development_inputs = {digest(c["files"] or {"prompt": c["prompt"]}) for c in plan["cases"]}
         if all(digest(c["files"] or {"prompt": c["prompt"]}) in development_inputs for c in acceptance["cases"]):
-            raise RefinerError("Acceptance set contains no new task inputs")
+            raise PlanGateError("Independent acceptance plan contains no fresh task inputs")
         if plan["coverage_gaps"] or acceptance["coverage_gaps"]:
-            event("coverage_gap", gaps=plan["coverage_gaps"] + acceptance["coverage_gaps"])
+            gaps = plan["coverage_gaps"] + acceptance["coverage_gaps"]
+            phase_progress("plan_gate", "not_passed", reason="coverage_gap", gaps=gaps)
+            state.update(status="plan_not_passed", gaps=gaps,
+                         error="Plan gate did not pass because required coverage is missing.")
+            write_json(work / "state.json", state)
+            print(json.dumps({"stage": "plan_gate", "status": "not_passed", "gaps": gaps,
+                              "skill_evaluation": "not_started"}, ensure_ascii=False), flush=True)
             return state
         locked = digest({"plan": plan, "acceptance": acceptance, "inputs": context})
         write_json(work / "oracle.lock.json", {"sha256": locked, "source_manifest": original_manifest,
                    "requirements": plan["requirements"], "checker_sha256": checker_hash,
                    "python_probe_sha256": helper_hash, "engine": backend.engine})
         stages.complete("planning")
+        phase_progress("plan_gate", "passed", development_cases=len(plan["cases"]),
+                       acceptance_cases=len(acceptance["cases"]), oracle_lock_sha256=locked)
         state["plan_ready"] = True
         write_work_plan(work, source=source, plan=plan, acceptance=acceptance, limits=limits)
         write_test_scenarios(work, plan=plan, acceptance=acceptance)
@@ -972,6 +1307,7 @@ def run(args):
             state.update(status="planned", planned_only=True,
                          planned_development_cases=len(plan["cases"]),
                          planned_acceptance_cases=len(acceptance["cases"]),
+                         skill_evaluation="not_started",
                          elapsed_seconds=round(elapsed_before + time.monotonic()-started, 2))
             write_json(work / "state.json", state)
             return state
@@ -985,9 +1321,15 @@ def run(args):
             fm = {}
         expected_name = fm.get("name") if isinstance(fm, dict) else None
         event("baseline")
+        require_plan_gate(state)
+        set_phase_result(state, "skill_evaluation", "running")
+        set_phase_result(state, "skill_evaluation", "running", suite="baseline")
+        write_json(work / "state.json", state)
         baseline_dir = work / "baseline"
         baseline_dir.mkdir(exist_ok=True)
         result = evaluate(original, plan["cases"], baseline_dir)
+        set_phase_result(state, "skill_evaluation", "passed" if result.get("passed") else "failed",
+                         suite="baseline", passed=result.get("passed"), cases=len(result.get("cases", [])))
         findings = standards_review(agent, original, context, baseline_dir, expected_name)
         original_result = result
         best, best_result, best_findings, best_unresolved = original, result, findings, []
@@ -999,6 +1341,8 @@ def run(args):
                 break
             if any(r["status"] == "ERROR" for r in best_result["cases"]):
                 event("execution_error", message="Resolve engine/environment errors before modifying the Skill")
+                set_phase_result(state, "skill_evaluation", "error", reason="execution_error")
+                write_json(work / "state.json", state)
                 return state
             event("repairing", round=number)
             round_dir = work / "iterations" / f"round-{number}"
@@ -1213,10 +1557,10 @@ def run(args):
         for path in sorted(before.keys() | after.keys()):
             if before.get(path) == after.get(path):
                 continue
-            old = (original/path).read_text() if path in before else ""
-            new = (final/path).read_text() if path in after else ""
+            old = (original/path).read_text(encoding="utf-8") if path in before else ""
+            new = (final/path).read_text(encoding="utf-8") if path in after else ""
             patch.extend(difflib.unified_diff(old.splitlines(True), new.splitlines(True), "original/"+path, "candidate/"+path))
-        (work / "final" / "changes.patch").write_text("".join(patch))
+        (work / "final" / "changes.patch").write_text("".join(patch), encoding="utf-8")
         write_json(work / "final" / "evidence.json", {"original_manifest": original_manifest,
                    "candidate_manifest": manifest(final), "oracle_hash": locked,
                    "baseline": original_result, "regression": best_result,
@@ -1230,11 +1574,39 @@ def run(args):
         stages.complete("acceptance")
         stages.complete("delivery")
         return state
+    except PlanGateError as exc:
+        phase_progress("plan_gate", "not_passed", reason=str(exc))
+        if state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "not_started":
+            state["status"] = "plan_not_passed"
+            state["skill_evaluation"] = "not_started"
+        state["error"] = str(exc)
+        write_json(work / "state.json", state)
+        print(json.dumps({"stage": "plan_gate", "status": "not_passed",
+                          "reason": str(exc), "skill_evaluation": "not_started"},
+                         ensure_ascii=False), flush=True)
+        return state
     except Cancelled as exc:
         event("cancelled", error=str(exc))
+        if state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "running":
+            set_phase_result(state, "skill_evaluation", "error", cancellation=str(exc))
         return state
     except Exception as exc:
-        event("error", error=str(exc))
+        if state.get("phase_results", {}).get("plan_gate", {}).get("status") != "passed" and \
+                state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "not_started":
+            phases = state.get("phase_results", {})
+            for name in ("plan_generation", "plan_self_check", "independent_review"):
+                phase_entry = phases.get(name, {})
+                if phase_entry.get("status") == "running":
+                    phase_progress(name, "error", reason=str(exc))
+                    break
+            state.update(status="planning_error", error=str(exc), skill_evaluation="not_started")
+            write_json(work / "state.json", state)
+            print(json.dumps({"stage": "planning", "status": "error", "reason": str(exc),
+                              "skill_evaluation": "not_started"}, ensure_ascii=False), flush=True)
+        else:
+            event("error", error=str(exc))
+            if state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "running":
+                set_phase_result(state, "skill_evaluation", "error", reason=str(exc))
         return state
     finally:
         state["agent_calls"] = agent.calls
@@ -1245,14 +1617,26 @@ def run(args):
         write_json(work / "state.json", state)
         write_report(work, state)
         if state.get("status") in {"passed", "unchanged"}:
+            set_phase_result(state, "skill_evaluation", "passed")
+            set_phase_result(state, "final_verification", "running")
+            write_json(work / "state.json", state)
             stages.activate("verification")
             try:
                 from .gate import verify_run
                 verification = verify_run(work)
                 write_json(work / "verification.json", verification)
                 state["verification_status"] = verification["status"]
+                set_phase_result(state, "final_verification", "passed",
+                                 verification_status=verification["status"])
             except Exception as exc:
                 state.update(status="verification_failed", verification_error=str(exc))
+                set_phase_result(state, "final_verification", "failed", reason=str(exc))
+            write_json(work / "state.json", state)
+            write_report(work, state)
+        elif state.get("phase_results", {}).get("plan_gate", {}).get("status") == "passed" and \
+                state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "running":
+            outcome = "error" if state.get("status") in {"error", "cancelled", "execution_error"} else "failed"
+            set_phase_result(state, "skill_evaluation", outcome, reason=state.get("error", state.get("status")))
             write_json(work / "state.json", state)
             write_report(work, state)
         stages.finish(state.get("status", "error"))
@@ -1270,6 +1654,29 @@ def write_report(work, state):
         lines.insert(3, "Verification: **failed** — " + state["verification_error"])
     if state.get("final_skill"):
         lines += [f"Candidate: `{state['final_skill']}`", "Original files were not overwritten.", ""]
+    phase_results = state.get("phase_results", {})
+    if phase_results:
+        lines += ["## Phase results", "", "| Phase | Status | Suite results |", "|---|---|---|"]
+        phase_labels = [
+            ("plan_generation", "Plan generation"),
+            ("plan_self_check", "Plan self-check"),
+            ("independent_review", "Independent review"),
+            ("plan_gate", "Plan gate"),
+            ("skill_evaluation", "Target Skill evaluation"),
+            ("final_verification", "Final Refiner verify"),
+        ]
+        for key, label in phase_labels:
+            entry = phase_results.get(key, {})
+            status = entry.get("status", "not_started")
+            if key == "plan_gate" and status == "not_passed":
+                status = "计划未通过 (not_passed)"
+            suites = entry.get("suites", {})
+            suite_text = ", ".join(f"{name}={value}" for name, value in suites.items()) or "—"
+            lines.append(f"| {label} | {status} | {suite_text} |")
+        lines.append("")
+        if phase_results.get("plan_gate", {}).get("status") != "passed":
+            lines.append("Target Skill evaluation: **not started**; the plan gate did not pass.")
+            lines.append("")
     phases = [("Baseline", work/"baseline"/"summary.json")]
     accepted_rounds = [r for r in state["rounds"] if r["accepted"]]
     if accepted_rounds:
