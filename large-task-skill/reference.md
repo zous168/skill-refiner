@@ -31,9 +31,32 @@
 用户明确改变范围时，在 `goal_changes` 追加原话和时间；新增标准就追加新 ID，失效的旧标准保留并标为 `superseded`、注明变更来源。只有 `verified` 或经用户变更明确标为 `superseded` 的标准才算结清。
 
 
+## 跨项目总览
+
+项目清单是本机显式白名单，不扫描任意磁盘路径，也不应提交到仓库：
+
+```json
+{
+  "version": 1,
+  "projects": [
+    { "id": "codex-project-id", "name": "project-name", "path": "D:/work/project-name" }
+  ]
+}
+```
+
+将清单保存为 Viewer 所在 `.tasks/project-sources.json`。`scripts/update_project_dashboard.py` 只检查每个登记目录的 `.tasks/snapshots/GE-*.json`，生成 `.tasks/project-dashboard.json`。汇总包含目标、状态、当前待办、已完成/待办数、验收进度、更新时间和快照内的可选子任务树，并附带供只读详情页使用的字段白名单快照投影及有限的 runtime 计数；不收集 prompt、日志或 artifacts 正文。项目总览只显示至少有一条 GoalExecutor 目标任务的项目；目标名称可点击打开对应任务详情，详情页通过「项目总览」返回。清单只表示已登记项目，不是自动发现或完整的操作系统目录清单。
+
+生成命令（从宿主仓库根目录运行）：
+
+```powershell
+python "<large-task-tracking skill>/scripts/update_project_dashboard.py" --sources ".tasks/project-sources.json" --output ".tasks/project-dashboard.json"
+```
+
+每次新增登记项目或已追踪快照发生阶段更新后，主Agent重跑生成命令。Viewer 定时读取汇总文件；快照始终是进度和验收的唯一来源，详情页使用汇总文件中的白名单投影进行导航展示。
+
 ## 长流程子 Skill 进度交接
 
-当一个领域 Skill 自己运行多阶段流程、测试或修复（例如 `skill-refiner`）时，GoalExecutor 主Agent仍是唯一的用户可见进度管理者；领域 Skill 保存可恢复的内部阶段和证据，不另建动态进度面板。Viewer 只读取主Agent维护的快照/runtime，不接管调度或写入进度。
+当一个领域 Skill 自己运行多阶段流程、测试或修复（例如 `skill-refiner`）时，GoalExecutor 主Agent仍是唯一的用户可见进度管理者；领域 Skill 保存可恢复的内部阶段和证据，不另建动态进度面板。单任务 Viewer 读取主Agent维护的快照/runtime；可选的项目总览读取由登记项目快照生成的 `project-dashboard.json`。两种视图都不接管调度或写入进度。
 
 - **拆分父级待办。** 按阶段建立少量父级 `todo_specs`，例如「冻结并展示设计/测试计划」「执行有预算的流程」「验证最终交付」。每项有 `goal_refs` 和可检查的 `done_when`。子 Skill 的 `planned` 只表示计划就绪，不能算作测试或父级目标完成。
 - **总快照只记摘要。** 父级快照的 `current_subtask`、`pending`、`done` 和标准状态表达用户能理解的阶段进展。把子 Skill 的工作目录、`state.json`、`stages.json` 和相关证据路径放入 runtime，或写入 `.tasks/artifacts/{task_id}/art_xxx.md` 的短索引文件，再在 `artifacts_ref` 只登记 art ID 与简短标题；不要把日志或测试结果全文复制进快照。

@@ -97,15 +97,23 @@ GoalExecutor 用轻量快照追踪目标、验收标准、待办和证据，并�
 
 ## Viewer 可视化同步
 
-GoalExecutor 进入多步执行后，在宿主提供本地持久化和浏览器能力时，为当前任务打开 Viewer。页面读 `.tasks/snapshots/{task_id}.json` 与 `.tasks/runtime/{task_id}.json`。任务层级来自快照可选字段 `tasks`：按 `parentId` 显示任意层级；可执行叶节点 ID 对应 `todo_specs.subtask_id`，分组节点使用独立 ID。`current_subtask` 以待办 ID 加中文冒号开头时，Viewer 精确标记该待办。Viewer 只读；进度和验收以快照的 `todo_specs`、`pending` 与验收标准为准。
+GoalExecutor 进入多步执行后，在宿主提供本地持久化和浏览器能力时，为当前任务打开 Viewer。单任务页面读取 `.tasks/snapshots/{task_id}.json` 与 `.tasks/runtime/{task_id}.json`。任务层级来自快照可选字段 `tasks`：按 `parentId` 显示任意层级；可执行叶节点 ID 对应 `todo_specs.subtask_id`，分组节点使用独立 ID。`current_subtask` 以待办 ID 加中文冒号开头时，Viewer 精确标记该待办。Viewer 只读；进度和验收以快照的 `todo_specs`、`pending` 与验收标准为准。
+
+### 单任务视图
 
 1. 初始化快照后准备 Viewer：页面要能按 `parentId` 展开多层任务。`.tasks/` 里已有的旧页如果做不到，不要复用；保留原文件，改用本 Skill 随附的 [viewer.html](viewer.html)，复制为 `.tasks/goalexecutor-viewer.html`。没有旧页时，复制为 `.tasks/viewer.html`。
 2. 用可观察的前台会话在 `.tasks/` 启动本地静态服务器：`python -m http.server 8765 --bind 127.0.0.1`。若端口已占用，确认现有服务指向当前 `.tasks/` 后复用；否则选择空闲端口。不要终止未知进程或启动不可观察的 detached 服务。
-3. 使用宿主的浏览器打开 `http://127.0.0.1:<端口>/<viewer文件名>?task_id=<task_id>`。Viewer 每 3 秒读取当前快照和 runtime；状态更新以磁盘上的 JSON 为准。
+3. 使用宿主的浏览器打开 `http://127.0.0.1:<端口>/<viewer文件名>?task_id=<task_id>`。Viewer 每 3 秒读取当前快照和 runtime；状态更新以磁盘上的 JSON 为准。页头“项目总览”入口可切换到项目视图。
 4. 只有主Agent可以写快照、runtime、`current-{actor}.json` 和 Viewer 所读的共享计划数据。子Agent按 `file_scope` 写自己的交付物，完成后回传证据，由主Agent更新状态。
 5. 若宿主无法持久化文件、启动可观察的本地服务器或打开浏览器，说明缺少哪项能力，继续用宿主支持的进度格式；不要声称 Viewer 已打开或实时同步。
 
-首次计划、阶段切换、收到回执、预算接近上限、阻塞和完成后，主Agent更新快照；Viewer 会在下一次轮询时反映变化。子Agent心跳可以进入 runtime，但不自动增加 GoalExecutor 的检查点计数。
+### 跨项目总览
+
+项目总览使用宿主或用户明确登记的本地项目目录，不扫描磁盘。项目清单 `.tasks/project-sources.json` 是本机配置，包含 `projects[]`，每项为 `{ "id", "name", "path" }`；不要把含本地绝对路径的清单提交到仓库。主Agent仅在有权限的项目清单工具可用时据此更新登记项，否则沿用用户提供或已登记的项目。
+
+运行 [update_project_dashboard.py](scripts/update_project_dashboard.py) 读取清单中每个 `<path>/.tasks/snapshots/GE-*.json`，生成 `.tasks/project-dashboard.json`。汇总保留项目名/路径、目标摘要、状态、验收计数、待办计数、更新时间和可选 `tasks` 树，并为只读详情页生成字段白名单投影及有限的 runtime 计数；不复制 prompt、日志或产物正文。打开 `?view=projects` 查看项目及其 GoalExecutor 目标任务；总览仅展示至少有一个目标任务的项目，空项目不显示。点击目标名称可打开该任务详情，详情页的「项目总览」入口可返回。跨项目详情从汇总投影读取，不直接加载登记项目中的任意文件。不带 `task_id` 或 `actor` 时也默认进入总览。新增项目或快照状态变化后，主Agent重新生成该文件；Viewer 每 3 秒读取汇总投影，但该文件不是执行状态源。
+
+首次计划、阶段切换、收到回执、预算接近上限、阻塞和完成后，主Agent更新快照；单任务 Viewer 会在下一次轮询时反映变化。若启用跨项目总览，主Agent在更新快照后重生成 `project-dashboard.json`。子Agent心跳可以进入 runtime，但不自动增加 GoalExecutor 的检查点计数。
 
 ## 强制运行规则
 
