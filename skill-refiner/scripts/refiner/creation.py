@@ -61,8 +61,9 @@ ANALYSIS = {
         "goal": STRING, "requirements": PLAN["properties"]["requirements"],
         "workflow": {"type": "array", "minItems": 1, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["id", "action", "inputs", "outputs", "failure_behavior", "requirement_ids"],
+            "required": ["id", "action", "inputs", "outputs", "completion_check", "failure_behavior", "requirement_ids"],
             "properties": {"id": STRING, "action": STRING, "inputs": STRING, "outputs": STRING,
+                           "completion_check": {"type": "string", "minLength": 8},
                            "failure_behavior": STRING, "requirement_ids": IDS}}},
         "scenarios": {"type": "array", "minItems": 3, "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False,
@@ -175,6 +176,7 @@ def analysis_markdown(analysis):
     lines += ["", "## Workflow", ""]
     for step in analysis["workflow"]:
         lines += [f"- {step['id']}: {step['action']}", f"  Input: {step['inputs']}; output: {step['outputs']}",
+                  f"  Completion check: {step['completion_check']}",
                   f"  Failure: {step['failure_behavior']}; requirements: {', '.join(step['requirement_ids'])}"]
     lines += ["", "## Scenario intents", ""]
     for scenario in analysis["scenarios"]:
@@ -439,7 +441,8 @@ def run(args):
                 'unless requested_name is supplied. Extract all business requirements with stable IDs and concrete source '
                 'citations into business_sources. Every requirement.source must begin with its source ID plus a colon '
                 '(for example spec-1: followed by the supporting passage). Include only business requirements from '
-                'these sources. Authoring standards, trigger description quality, script organization and controller '
+                'these sources. For every workflow step, include a concrete completion_check that names observable '
+                'evidence proving the step is complete; do not use generic wording such as "done". Authoring standards, trigger description quality, script organization and controller '
                 'integrity remain in standards review; do not add them as business test requirements unless the user '
                 'explicitly requested that as an externally observable business capability. Analyze workflow inputs, outputs, order, decisions and failure '
                 'behavior. Assess normal, boundary and error scenario categories exactly once each. Map all required '
@@ -462,7 +465,9 @@ def run(args):
                 review = agent.ask('analysis-review',
                     'Independently review business analysis against the original request and supplied standards. '
                     'Check every requested behavior is retained and each derived requirement is grounded; cite the '
-                    'specific request or explicit reasonable implementation assumption for every assessment. Reject '
+                    'specific request or explicit reasonable implementation assumption for every assessment. Check '
+                    'that each workflow step has a concrete observable completion_check, and that its inputs, outputs, '
+                    'failure behavior and requirement links are clear. Reject '
                     'invented material business rules, omitted workflows, fabricated dependencies, arbitrary error '
                     'contracts and unjustified exclusions of normal/boundary/error scenarios. Do not require features '
                     'the user excluded. Approve only a clear, scoped contract suitable for independent test planning.',

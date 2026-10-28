@@ -17,6 +17,37 @@ For strict enforcement, its host must restrict direct Skill writes or provide a
 tool/hook that routes them through the controller. Read [host enforcement limits](references/host-enforcement.md)
 before claiming that arbitrary agents are compelled to use this workflow.
 
+## Autonomous operation and visible progress
+
+When the user asks to create, run or improve a Skill, carry the work from discovery
+through implementation, bounded testing, evidence-based repair and final verification.
+Autonomy is the default: do not stop after presenting a plan or hand back commands for
+the user to run. Present the frozen plan, then continue in the same run without waiting
+for routine approval. A plan-only result is final only when the user explicitly asks
+for planning alone.
+
+Make every visible plan readable as numbered steps. Each step states its goal, actions,
+inputs, outputs/evidence, the conclusion required to advance, and what happens if that
+conclusion is not met. Report meaningful transitions as: step number/name, live status,
+one-sentence conclusion, evidence path, and next step. Static plans describe expected
+gates; live progress comes from structured events, state.json and stages.json.
+large-task-tracking owns cross-turn progress when applicable; this Skill owns the
+internal phase state and evidence.
+
+For new Skills, every business workflow step in the reviewed analysis also needs an
+observable completion check beside its inputs, outputs, failure behavior and
+requirement links. The human-readable plan shows that check as the step's success
+conclusion.
+
+Pause only when a material business decision or required permission cannot be inferred
+safely, the user asks to stop or plan only, a required local action or dependency is
+unavailable, a phase gate fails, or a configured budget is exhausted. Resolve reversible
+low-impact details as recorded assumptions. Do not run open-ended tests, silently reset
+budgets, repeat completed evidence, or infer completion from elapsed time. On
+interruption, resume the same run and reuse completed stages whose contracts and hashes
+still match; if the frozen contract changed, preserve the old evidence and explain why
+a new run is required.
+
 ## Using the Skill in any Agent host
 
 Resolve the target Skill and requirements from the user's message and session.

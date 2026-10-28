@@ -14,8 +14,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 from refiner.checks import validate_plan  # noqa: E402
 from refiner.common import PlanGateError, RefinerError, read_json, run_process, write_json  # noqa: E402
+from refiner.creation import ANALYSIS, analysis_markdown, validate_analysis  # noqa: E402
 from refiner.plan import write_test_scenarios, write_work_plan  # noqa: E402
-from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, initial_phase_results, make_plan,
+from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate, initial_phase_results, make_plan,
                                require_plan_gate, set_phase_result, validate_plan_review)  # noqa: E402
 from refiner.gate import (_verify_phase_history, _verify_plan_control_artifacts,
                           _verify_plan_review_artifacts)  # noqa: E402
@@ -306,6 +307,15 @@ class PlanReviewValidationTests(unittest.TestCase):
 
 
 class PlanRevisionAndPhaseGateTests(unittest.TestCase):
+    def test_upstream_planning_error_closes_a_running_plan_gate(self):
+        state = {"phase_results": initial_phase_results(), "phase_history": []}
+        set_phase_result(state, "plan_gate", "running")
+        self.assertTrue(close_incomplete_plan_gate(state, "planner connection reset"))
+        self.assertEqual(state["phase_results"]["plan_gate"]["status"], "not_passed")
+        self.assertEqual(state["phase_history"][-1]["reason"], "upstream_error")
+        self.assertEqual(state["phase_history"][-1]["error"], "planner connection reset")
+        self.assertFalse(close_incomplete_plan_gate(state, "a later error"))
+
     def test_accepted_plan_persists_full_controls_and_independent_review(self):
         plan = _minimal_plan()
 
@@ -476,6 +486,48 @@ class PlanMarkdownRenderingTests(unittest.TestCase):
         self.assertIn("acceptance-spec.md#A1", scenarios)
         self.assertIn("contains; expected=token-acc-normal", scenarios)
         self.assertIn("Oracle rationale:", work_plan)
+        self.assertEqual(work_plan.count("- Conclusion required to advance:"), 8)
+        self.assertIn("Step 1 — Inspect the request and map the existing Skill", work_plan)
+        self.assertIn("Step 4 — Pass the plan gate before target evaluation", work_plan)
+        self.assertIn("Step 8 — Verify and deliver", work_plan)
+        self.assertIn("showing this plan is a visibility checkpoint, not an approval wait", work_plan)
+        self.assertIn("exhausted configured budget", work_plan)
+
+
+class CreationAnalysisConclusionTests(unittest.TestCase):
+    def _analysis(self):
+        return {
+            "name": "demo-skill",
+            "goal": "Complete the requested business workflow.",
+            "requirements": [
+                {"id": "R1", "behavior": "Return a useful result.", "source": "spec-1: requested result", "required": True},
+            ],
+            "workflow": [
+                {"id": "W1", "action": "Process the request.", "inputs": "Request text.",
+                 "outputs": "A result.", "completion_check": "The result contains the requested fields.",
+                 "failure_behavior": "Report the missing field and stop.", "requirement_ids": ["R1"]},
+            ],
+            "scenarios": [
+                {"kind": "normal", "applicable": True, "situation": "Valid request.",
+                 "expected_behavior": "Return the requested result.", "basis": "R1",
+                 "requirement_ids": ["R1"]},
+                {"kind": "boundary", "applicable": False, "situation": "No extra boundary case.",
+                 "expected_behavior": "Not applicable to this scope.", "basis": "No boundary behavior requested.",
+                 "requirement_ids": []},
+                {"kind": "error", "applicable": False, "situation": "No extra error case.",
+                 "expected_behavior": "Not applicable to this scope.", "basis": "No error behavior requested.",
+                 "requirement_ids": []},
+            ],
+            "assumptions": [], "external_dependencies": [], "blocking_questions": [],
+        }
+
+    def test_business_workflow_step_requires_observable_completion_check(self):
+        analysis = self._analysis()
+        validate_analysis(analysis)
+        self.assertIn("Completion check: The result contains the requested fields.", analysis_markdown(analysis))
+        del analysis["workflow"][0]["completion_check"]
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_analysis(analysis)
 
 
 if __name__ == "__main__":

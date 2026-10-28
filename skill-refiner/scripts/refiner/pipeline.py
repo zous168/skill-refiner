@@ -83,6 +83,15 @@ def set_phase_result(state, name, status, *, suite=None, **details):
     return entry
 
 
+def close_incomplete_plan_gate(state, reason, *, cause="upstream_error"):
+    """Give a started plan gate a terminal result when planning cannot finish."""
+    entry = state.get("phase_results", {}).get("plan_gate", {})
+    if entry.get("status") not in {"pending", "running"}:
+        return False
+    set_phase_result(state, "plan_gate", "not_passed", reason=cause, error=str(reason))
+    return True
+
+
 def require_plan_gate(state):
     phases = state.get("phase_results", {})
     for name in ("plan_generation", "plan_self_check", "independent_review"):
@@ -1587,8 +1596,10 @@ def run(args):
         return state
     except Cancelled as exc:
         event("cancelled", error=str(exc))
+        close_incomplete_plan_gate(state, str(exc), cause="cancelled")
         if state.get("phase_results", {}).get("skill_evaluation", {}).get("status") == "running":
             set_phase_result(state, "skill_evaluation", "error", cancellation=str(exc))
+        write_json(work / "state.json", state)
         return state
     except Exception as exc:
         if state.get("phase_results", {}).get("plan_gate", {}).get("status") != "passed" and \
@@ -1599,6 +1610,7 @@ def run(args):
                 if phase_entry.get("status") == "running":
                     phase_progress(name, "error", reason=str(exc))
                     break
+            close_incomplete_plan_gate(state, str(exc))
             state.update(status="planning_error", error=str(exc), skill_evaluation="not_started")
             write_json(work / "state.json", state)
             print(json.dumps({"stage": "planning", "status": "error", "reason": str(exc),

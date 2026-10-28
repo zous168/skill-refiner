@@ -92,6 +92,39 @@ rejected before transmission. Reduce the stage handoff or set a tested limit; do
 remove required inputs, tests, or evidence just to fit. Full source and execution
 evidence remain in the run directory even when a role receives a bounded excerpt.
 
+## Human-readable phase plan and progress
+
+The generated work-plan.md is the user-facing execution map, not only a list of test
+cases. It must contain a numbered ordered phase sequence. Each step states its goal,
+actions, required inputs, outputs/evidence, conclusion required to advance, and the
+failure or stop action. Creation plans include business analysis and first-draft gates
+before the shared refinement sequence; refinement plans begin with source and
+requirement mapping. Both then show plan freezing, plan self-check and independent
+review, the plan gate, baseline, bounded repair with full regression, independent
+acceptance, and final verification/delivery.
+
+For business workflow analysis, each user-facing workflow step also has an observable
+completion_check. Render it beside the step's inputs, outputs, failure behavior and
+requirement links so a reader can tell what success means.
+
+Presenting the plan is a visibility checkpoint, not routine approval. Unless the user
+explicitly requests plan-only, proceed autonomously in the same run. Pause for a
+material unanswered decision, required permission/local action, explicit user stop,
+failed gate, unavailable dependency, or exhausted configured budget. Do not reset the
+budget, repeatedly run unchanged tests, or abandon a resumable stage. Resume the same
+run and reuse completed evidence while hashes and contracts match. A changed frozen
+input or controller contract requires preserving the old evidence and using a new run.
+
+At each meaningful transition, report the step number/name, live status, concise
+conclusion, evidence path, and next step. Populate these from structured events and
+state.json/stages.json. The static plan states expected conclusions; it must not be
+presented as evidence that execution already passed.
+
+When planning, self-check or independent review ends in an error or cancellation, close
+any pending/running plan gate as not_passed and persist the cause. Keep target
+skill_evaluation at not_started. A terminal planning error must never leave the gate
+displayed as running.
+
 ## Existing creation and refinement stages
 
 | Stage | Required input artifacts | Output artifacts and formats | Gate before handoff |

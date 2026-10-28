@@ -84,6 +84,18 @@ controller's concrete versioned contracts and context budget.
 
 ## 5. Plan independent tests before repair
 
+The readable plan is a visibility checkpoint, not an approval barrier. When the user
+asks for a Skill to be created or improved, continue autonomously after showing the
+plan unless the user explicitly requests plan-only or a material decision remains
+unresolved. Do not stop at instructions or commands when the current host can execute
+the next stage.
+
+Make the plan a numbered sequence. For each step show its goal, actions, inputs,
+outputs/evidence, observable exit conclusion, and the stop or repair action when that
+conclusion is not met. Report each meaningful transition with the step, live status,
+conclusion, evidence path, and next step. The plan describes expected gates; execution
+status must come from persisted phase state and structured events.
+
 Map every required behavior to at least one executable check. Plan concrete normal,
 boundary, and error cases where applicable, including configuration and help-request
 paths when they affect behavior. Define observable inputs, expected outputs, and

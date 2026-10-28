@@ -92,6 +92,139 @@ def _source_overview(source):
     return description, [("section", item) for item in headings] + [("file", item) for item in files[:80]]
 
 
+def _execution_phases(analysis):
+    if analysis:
+        first = (
+            "Analyze and review the business request",
+            "Turn the user request into grounded, testable business requirements.",
+            "Map the workflow, decisions, inputs, outputs and applicable normal/boundary/error scenarios; obtain an independent analysis review.",
+            "Original request, cited sources and discovered standards.",
+            "analysis.json, analysis-review.json, business-analysis.md and business.lock.json.",
+            "Every required behavior has a source and workflow mapping; review approves; no material blocking question remains.",
+            "A material unanswered question ends this run at needs_clarification; do not invent a business rule.",
+        )
+        second = (
+            "Build and statically check the first Skill draft",
+            "Create the first complete implementation from the reviewed contract.",
+            "Write the Skill files, validate paths and metadata, and run static authoring checks.",
+            "Approved business contract and original requirements.",
+            "drafts/ and draft-manifest.json.",
+            "All required files exist, are traceable to requirements, and static checks pass.",
+            "Preserve the draft and report the concrete finding; do not enter refinement with an invalid draft.",
+        )
+        planning = (
+            "Freeze development and independent acceptance plans",
+            "Convert each required behavior into complete, executable cases.",
+            "Read the actual schema first; create the full matrix, positive and targeted negative controls, and asset audits.",
+            "Reviewed requirements, current Skill source, actual plan schema and standards.",
+            "test-plan.json, acceptance-plan.json, plan-controls and work-plan.md.",
+            "Every requirement maps to scenarios, expected correct and incorrect results, assertions, controls and audited assets; the frozen inputs are hashed.",
+            "Keep target evaluation not_started if coverage or schema completeness is unclear.",
+        )
+    else:
+        first = (
+            "Inspect the request and map the existing Skill",
+            "Understand the requested behavior and the Skill's real implementation.",
+            "Read SKILL.md, linked references, scripts, configuration, standards and available execution evidence; map requirements to source locations.",
+            "User request, target Skill, project standards and available run evidence.",
+            "Requirement/source map, assumptions and identified dependencies.",
+            "Each requirement is grounded and has an observable expected outcome; material unknowns are separated from safe assumptions.",
+            "Ask only for a material business decision or access choice that evidence cannot resolve.",
+        )
+        second = (
+            "Freeze the complete scenario matrix",
+            "Define development and independent acceptance cases before changing the Skill.",
+            "Read the actual schema first; map each requirement to normal/boundary/error scenarios, correct and incorrect outcomes, semantic assertions, controls and asset audits.",
+            "Requirement/source map, actual plan schema, Skill snapshot and standards.",
+            "test-plan.json, acceptance-plan.json, plan-controls and work-plan.md.",
+            "All required behaviors are covered, every case is schema-complete, controls are targeted, assets are audited and inputs are hash-frozen.",
+            "Do not run the target Skill while required coverage, schema fields or oracle evidence are missing.",
+        )
+        planning = (
+            "Self-check plans and complete independent review",
+            "Prove that the frozen cases distinguish intended behavior from plausible mistakes.",
+            "Run every positive and negative control against all assertions; review each suite independently; repair the plan and rerun the complete control set after any revision.",
+            "Frozen development and acceptance matrices, assertions and control responses.",
+            "plan-controls results, plan-reviews and structured failure diagnostics.",
+            "Every positive passes all required assertions, every negative triggers its designated semantic assertion, and both reviews pass.",
+            "A failed control or review keeps the plan gate closed; do not label it as a Skill failure.",
+        )
+    phases = [first, second, planning]
+    phases.extend([
+        (
+            "Pass the plan gate before target evaluation",
+            "Aggregate schema, control, asset and independent-review evidence.",
+            "Recompute required checks from the frozen artifacts and record the separate phase result.",
+            "Frozen plans, control results and review reports.",
+            "plan-gate result in state.json and stages.json.",
+            "Only an explicit passed plan gate allows target evaluation to start.",
+            "On plan_not_passed, leave skill_evaluation not_started and report the exact failed assertion and evidence.",
+        ),
+        (
+            "Run the baseline",
+            "Measure the original Skill against the complete development suite.",
+            "Execute every frozen development case on every configured engine and preserve outputs and judgments.",
+            "Passing plan gate, original Skill snapshot and development plan.",
+            "Baseline summaries, per-case results and raw engine evidence.",
+            "Every configured engine has an observed result; classify Skill defects separately from test gaps and environment errors.",
+            "An unavailable engine or execution error is an error state, not a pass; preserve evidence and stop dependent work.",
+        ),
+        (
+            "Repair and run full regression",
+            "Improve only behavior tied to an evidenced failed case or material standards finding.",
+            "Make a bounded repair, then rerun the entire development suite, including previously passing cases, for each repair round.",
+            "Baseline failures, frozen requirements and cited findings.",
+            "Candidate changes, repair rationale, full regression results and per-round evidence.",
+            "The cited defect is corrected and no previously passing behavior regresses.",
+            "Stop at the configured round/call/evaluation budget or repeated lack of improvement; never reset budgets or rerun completed evidence without a changed contract.",
+        ),
+        (
+            "Run independent acceptance",
+            "Check the qualified candidate against the separately frozen acceptance suite.",
+            "Run every held-out acceptance case on every configured engine and preserve the raw evidence.",
+            "Candidate with passing full regression and independent acceptance plan.",
+            "Acceptance summary, per-case judgments and immutable attempt evidence.",
+            "Every configured engine passes every required independent case.",
+            "If acceptance fails, expose only failed acceptance evidence to repair, then repeat full regression and the full acceptance suite within the same run budget.",
+        ),
+        (
+            "Verify and deliver",
+            "Bind the delivered candidate to its frozen plans and observed test evidence.",
+            "Recompute final hashes, stage contracts, regression, acceptance and delivery artifacts.",
+            "Qualified candidate and complete stage evidence.",
+            "verification.json, final report, candidate and diff.",
+            "Only machine status=verified permits a completion claim.",
+            "If verification fails or evidence is missing, report the exact gate and keep the run incomplete.",
+        ),
+    ])
+    return phases
+
+
+def _execution_phase_markdown(analysis):
+    lines = [
+        "## Execution phases and step conclusions", "",
+        "This is the ordered execution map. Each step must end with its stated conclusion and evidence before dependent work advances.", "",
+        "### Autonomous progression", "",
+        "Unless the user explicitly asks for plan-only, showing this plan is a visibility checkpoint, not an approval wait. Continue the same run through implementation, tests, repair and verification. Pause only for a material unanswered business decision, a required permission or local action, an explicit user stop, a failed gate, an environment blocker, or an exhausted configured budget.", "",
+        "At each meaningful transition, report the step number and name, live status, one-sentence conclusion, evidence path and next step. Read live status from structured events, state.json and stages.json; never infer completion from a static plan, elapsed time or heartbeat count.", "",
+    ]
+    for index, (title, goal, actions, inputs, outputs, conclusion, stop) in enumerate(_execution_phases(analysis), 1):
+        lines += [
+            f"### Step {index} — {title}", "",
+            f"- Goal: {_md(goal)}",
+            f"- Actions: {_md(actions)}",
+            f"- Inputs: {_md(inputs)}",
+            f"- Outputs and evidence: {_md(outputs)}",
+            f"- Conclusion required to advance: {_md(conclusion)}",
+            f"- If the conclusion is not met: {_md(stop)}", "",
+        ]
+    lines += [
+        "Completed stages and their evidence are reused on resume when hashes and contracts still match. Resume the same run after interruption; do not repeat completed stages. If a frozen input or controller contract changes, preserve the old evidence and start a new run only for the changed contract.",
+        "",
+    ]
+    return lines
+
+
 def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=None, limits=None):
     """Write the visible, frozen design and test checklist before test execution."""
     work = Path(work)
@@ -110,6 +243,7 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
         for step in analysis.get("workflow", []):
             lines += [f"- **{_md(step['id'])}:** {_md(step['action'])}",
                       f"  - Input: {_md(step['inputs'])}; output: {_md(step['outputs'])}",
+                      f"  - Completion check: {_md(step['completion_check'])}",
                       f"  - Failure handling: {_md(step['failure_behavior'])}",
                       f"  - Requirements: {', '.join(step['requirement_ids'])}"]
         _, outline = _source_overview(source)
@@ -147,6 +281,7 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
         lines += ["", "## Assumptions", ""] + [f"- {_md(x)}" for x in analysis["assumptions"]]
     if analysis and analysis.get("external_dependencies"):
         lines += ["", "## External dependencies", ""] + [f"- {_md(x)}" for x in analysis["external_dependencies"]]
+    lines += [""] + _execution_phase_markdown(analysis)
     lines += ["", "## Acceptance criteria", "",
               "- Every required behavior is covered by the frozen, independently reviewed cases.",
               "- Each configured executor passes the full independent acceptance suite.",
