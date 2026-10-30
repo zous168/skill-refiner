@@ -15,10 +15,11 @@ from .agent import Agent
 from .checks import validate_plan
 from .common import (Cancelled, PlanControlError, PlanGateError, PlanValidationError, RefinerError, digest, inventory, manifest, read_json, relative_path,
                      snapshot, write_json)
-from .schemas import PLAN, PLAN_REVIEW, PLAN_REVIEW_V2, REPAIR, REVIEW
+from .schemas import (PLAN, PLAN_REVIEW, PLAN_REVIEW_V2, PLAN_REVIEW_V3,
+                      PLAN_REVIEW_V4, REPAIR, REVIEW)
 from .evidence import repair_evidence
 from .skillup import SkillUp
-from .standards import AUTHORING, discover_project_standards, lint
+from .standards import AUTHORING, SELF_REVIEW_STANDARD, discover_project_standards, lint
 from .profiles import load_config
 from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
@@ -338,7 +339,7 @@ full prompt into scenario or expected_outcome."""
 PLANNING += """
 
 Schema-first JSON contract: read the supplied response_schema before planning. Return exactly one JSON
-object matching it, without Markdown fences or prose. Use schema_version=skill-refiner.plan/v3. Every case
+object matching it, without Markdown fences or prose. Use schema_version=skill-refiner.plan/v5. Every case
 must include every required field; always emit helpers as an array, using [] when no helper is needed.
 Use only the schema's kind and check-type enums. Give every check a unique stable id. Include an asset_audit
 with every fixture/helper path marked required and available, all linked requirement source_refs, a valid
@@ -358,6 +359,41 @@ alternation. Include different positive paraphrases and negative responses in th
 single narrow phrase such as only '不需要补集数' when '无需补集数' has the same meaning, and do not rely on
 one not_contains phrase to detect every wording of an operator's incorrect judgment. Controls must show that
 the assertion distinguishes business meaning: vary the target behavior while keeping unrelated fields correct."""
+PLANNING += """
+
+Every v5 plan must include stage_contracts for the Skill's complete persisted/handoff workflow. Declare
+stable schema IDs, exactly one active version per logical ID, package-relative schemas/vN/<name>.schema.json paths
+where N matches the schema version,
+validator IDs and executable validator paths, and whether each schema is needed at target runtime. A version is
+for an incompatible persisted-format change, not an internal revision; do not list historical or compatibility
+versions in the target Skill contract. Only package schemas and validators marked as needed at target runtime.
+Map every stage's requirement IDs, inputs, outputs, validation gate,
+failure states, observable completion check and resume policy. Every input/output artifact references a
+declared schema. Every runtime validator and schema file must be packaged. Every stage validates after generation, before handoff, on resume and at final verification.
+Do not claim a schema exists when only planned: name the file to be delivered and have the final Skill include
+every schema it needs at runtime. Define artifacts in the Skill package, not in Refiner run records. The
+controller's own stage artifacts use the same packaged schema/validator policy with no self-exemption."""
+PLANNING += """
+
+Every v5 plan also includes a schema-valid execution_plan. State the objective, in-scope/out-of-scope work,
+constraints and bounded concurrency. Break the work into ordered, stable-ID steps. Every step names its goal,
+concrete actions, inputs, output paths with schema ID/version and observable evidence, requirement IDs, case IDs,
+dependencies, execution mode, and one responsible Agent role with isolated write scope, merge owner and join gate.
+Give every step observable exit criteria and a bounded failure policy with terminal state and same-run recovery policy.
+Use contiguous order numbers; all requirement and case IDs must be covered. Only put independent tasks in the same
+parallel wave; explain every serial step. If the host or task provides no safe independent work, set concurrency to 1
+and explain the serial schedule. The development and held-out acceptance plans must preserve this exact execution_plan.
+The human-readable work plan must render these steps from the structured object, not invent a separate schedule."""
+PLANNING += "\n\n" + SELF_REVIEW_STANDARD
+LANGUAGE_POLICY_PLANNING = (
+    "Language acceptance is part of the frozen plan. For a new Skill, default its user-facing instructions and "
+    "human-readable package text to Simplified Chinese unless the user specifies another language. For refinement, "
+    "preserve the existing Skill language unless translation is requested. Include at least one case that checks "
+    "SKILL.md and representative references or user-visible messages in the required language; do not translate "
+    "machine identifiers, protocol literals, source quotations, or business outputs whose language is specified by "
+    "the workflow."
+)
+PLANNING += "\n\n" + LANGUAGE_POLICY_PLANNING
 
 PLAN_REVIEW_CASE_BOOLS = (
     "installed_source_unchanged", "fixture_contract_consistent", "response_contract_consistent",
@@ -366,13 +402,50 @@ PLAN_REVIEW_CASE_BOOLS = (
     "asset_audit_consistent", "positive_controls_validated", "negative_controls_targeted",
     "acceptance_criteria_traceable", "scenario_detail_complete", "risk_coverage_complete",
 )
+
+SELF_REVIEW_PLAN_REVIEW = (
+    "Independently verify that every consequential target workflow has a frozen, evidence-linked self-review "
+    "checklist whose checks link to requirements, acceptance criteria and scenarios. Controls must cover a passing "
+    "self-check and a missing-evidence/failure path. Verify the record contract and that one targeted correction is "
+    "the maximum: a still-failing check becomes blocked. Self-review cannot replace independent acceptance, add "
+    "checks during execution, or trigger unbounded test rounds."
+)
+
+LANGUAGE_PLAN_REVIEW = (
+    "Independently verify the frozen language policy and its test coverage: new Skills default human-readable "
+    "instructions to Simplified Chinese, existing Skills retain their language unless translation is requested, "
+    "and the language checks leave machine contracts and required business-output languages intact."
+)
 PLAN_REVIEW_CASE_BOOLS_V2 = PLAN_REVIEW_CASE_BOOLS[:-3]
 
 
 def validate_plan_review(review, plan):
     import jsonschema
-    legacy = plan.get("schema_version") == "skill-refiner.plan/v2"
-    jsonschema.validate(review, PLAN_REVIEW_V2 if legacy else PLAN_REVIEW)
+    version = plan.get("schema_version")
+    legacy = version == "skill-refiner.plan/v2"
+    review_schema = {"skill-refiner.plan/v2": PLAN_REVIEW_V2,
+                     "skill-refiner.plan/v3": PLAN_REVIEW_V3,
+                     "skill-refiner.plan/v4": PLAN_REVIEW_V4}.get(version, PLAN_REVIEW)
+    jsonschema.validate(review, review_schema)
+    if version == "skill-refiner.plan/v4" and not all(
+            review[key] for key in ("stage_contracts_assessed", "stage_contracts_complete",
+                                    "schema_paths_safe", "validator_lifecycle_covered")):
+        raise RefinerError("Independent plan review rejected incomplete Skill stage schema contracts")
+    if version == "skill-refiner.plan/v5":
+        required_plan_flags = ("stage_contracts_assessed", "stage_contracts_complete", "schema_paths_safe",
+                               "validator_lifecycle_covered", "execution_plan_assessed", "execution_plan_complete",
+                               "dependency_graph_valid", "concurrency_safe", "failure_recovery_bounded")
+        if not all(review[key] for key in required_plan_flags):
+            raise RefinerError("Independent plan review rejected incomplete stage schema contracts or execution plan elements")
+        step_reviews = review["step_assessments"]
+        expected_steps = {step["id"] for step in plan["execution_plan"]["steps"]}
+        assessed_steps = [row["step_id"] for row in step_reviews]
+        if len(assessed_steps) != len(set(assessed_steps)) or set(assessed_steps) != expected_steps:
+            raise RefinerError("Independent plan review must assess every execution step exactly once")
+        flags = ("goal_actions_clear", "inputs_outputs_evidenced", "requirement_case_traceable",
+                 "dependencies_valid", "agent_scope_safe", "exit_and_recovery_clear")
+        if review["approved"] and any(not all(row[key] for key in flags) for row in step_reviews):
+            raise RefinerError("Approved plan review contradicts an execution step assessment")
     contracts = review["case_contracts"]
     expected = {c["id"] for c in plan["cases"]}
     assessed = [c["case_id"] for c in contracts]
@@ -407,6 +480,8 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                          ("Include one distinct executable case for each applicable required_scenario_ids entry; "
                           "copy the source scenario details and keep the scenario_id stable. "
                           if context.get("required_scenario_ids") else "") +
+                         ("Copy expected_execution_plan exactly; development and independent acceptance use one frozen work plan. "
+                          if context.get("expected_execution_plan") is not None else "") +
                          ("Use different inputs from common examples; these are independent acceptance cases. "
                           "Copy the supplied contract requirement list exactly, preserving IDs and all properties."
                           if role == "acceptance-plan" else ""),
@@ -475,6 +550,17 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                                           "field_path": "requirements",
                                           "expected_condition": context["contract"],
                                           "actual_value": plan["requirements"]})
+            if ("stage_contracts" in context
+                    and plan.get("stage_contracts") != context["stage_contracts"]):
+                revision_failures.append({"kind": "changed_frozen_stage_artifact_contract",
+                                          "field_path": "stage_contracts",
+                                          "expected_condition": "exactly preserve the frozen Skill stage/schema map",
+                                          "actual_value": plan.get("stage_contracts")})
+            if (previous_plan and plan.get("execution_plan") != previous_plan.get("execution_plan")):
+                revision_failures.append({"kind": "changed_frozen_execution_plan",
+                                          "field_path": "execution_plan",
+                                          "expected_condition": "preserve the complete approved step/dependency/agent/recovery plan",
+                                          "actual_value": plan.get("execution_plan")})
             missing_kinds = set(context.get("required_case_kinds", [])) - {c["kind"] for c in plan["cases"]}
             if missing_kinds:
                 revision_failures.append({"kind": "missing_required_scenario_categories",
@@ -492,7 +578,8 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                     required_case_kinds=context.get("required_case_kinds", []),
                     required_scenario_ids=required_scenario_ids or [],
                     expected_scenarios=expected_scenarios,
-                    expected_requirements=context.get("contract"))
+                    expected_requirements=context.get("contract"),
+                    expected_execution_plan=context.get("expected_execution_plan"))
             except PlanValidationError as exc:
                 failed_evidence = {**exc.evidence, "suite": suite, "attempt": attempt + 1,
                                    "plan_sha256": digest(plan), "plan_snapshot": plan,
@@ -667,7 +754,9 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
                      phase_callback=None, agent_parallelism=2, wave_callback=None):
     """Plan development and acceptance; overlap only after requirements are frozen."""
     def make_acceptance(plan):
-        return make_plan(agent, {**context, "contract": plan["requirements"]}, work,
+        return make_plan(agent, {**context, "contract": plan["requirements"],
+                                 "stage_contracts": plan["stage_contracts"],
+                                 "expected_execution_plan": plan["execution_plan"]}, work,
                          acceptance_cases, "acceptance-plan", max_attempts,
                          phase_callback=phase_callback, suite="acceptance")
 
@@ -708,6 +797,8 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
                 {"id": "AG-DEV-REVIEW", "status": "passed"},
                 {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"},
             ], development_status="passed", acceptance_status="passed")
+        if plan["execution_plan"] != acceptance["execution_plan"]:
+            raise PlanGateError("Development and independent acceptance plans do not share the same frozen execution_plan")
         return plan, acceptance
     acceptance_future = None
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="skill-refiner-plan") as pool:
@@ -761,6 +852,8 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
         wave_callback("passed", development_status="passed", acceptance_status="passed",
                       task_results=[{"id": "AG-DEV-REVIEW", "status": "passed"},
                                     {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"}])
+    if plan["execution_plan"] != acceptance["execution_plan"]:
+        raise PlanGateError("Development and independent acceptance plans do not share the same frozen execution_plan")
     return plan, acceptance
 
 
@@ -771,7 +864,10 @@ def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback
 
     phase("running", case_ids=[case["id"] for case in plan["cases"]])
     try:
-        review_schema = PLAN_REVIEW_V2 if plan.get("schema_version") == "skill-refiner.plan/v2" else PLAN_REVIEW
+        review_schema = {"skill-refiner.plan/v2": PLAN_REVIEW_V2,
+                         "skill-refiner.plan/v3": PLAN_REVIEW_V3,
+                         "skill-refiner.plan/v4": PLAN_REVIEW_V4}.get(
+                             plan.get("schema_version"), PLAN_REVIEW)
         review = agent.ask("plan-review",
                            "Independently review this already-frozen Skill test plan against the source "
                            "requirements, scenarios, expected outcomes, assets, response assertions and "
@@ -786,7 +882,14 @@ def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback
                            "in each issue. For v3 cases assess atomic-criterion traceability, concrete scenario "
                            "detail and workflow-specific risk coverage. Verify preconditions, stimulus, ordered "
                            "actions, observable expected results and forbidden outcomes; reject broad, duplicated "
-                           "or paraphrased scenarios. Approve only if all flags are true and the complete plan is useful.",
+                            "or paraphrased scenarios. For v4/v5, independently assess every stage/artifact schema link, "
+                            "safe schema path, target-runtime packaging need and all four validator lifecycle points; "
+                            "set each stage_contracts review flag from evidence. For v5, also inspect the full execution_plan: "
+                            "assess every ordered step exactly once, verify requirement/case traceability, input/output evidence, "
+                            "dependency DAG, nonoverlapping parallel write scopes, explicit serial reasons, bounded failure "
+                            "attempts and same-run recovery. Set all execution_plan review flags and step_assessments from "
+                            "the plan evidence; approval is allowed only when every required flag is true and the complete "
+                           "plan is useful. " + SELF_REVIEW_PLAN_REVIEW + " " + LANGUAGE_PLAN_REVIEW,
                            {"context": context, "plan": plan, "control_results": control_results,
                             "previous_case_ids": [case["id"] for case in plan["cases"]]}, review_schema)
         _persist_plan_review(agent.work, suite, 1, plan, review)
@@ -1087,7 +1190,12 @@ def run(args):
         original_manifest = manifest(source)
         original = work / "original" / source.name
         snapshot(source, original)
-        context = {"files": inventory(original, max_bytes=300_000), "requirements": [], "standards": [AUTHORING]}
+        context = {"files": inventory(
+            original, max_bytes=275_000,
+            priority_paths=("scripts/refiner/pipeline.py", "scripts/refiner/checks.py",
+                            "scripts/refiner/plan.py", "scripts/refiner/schemas.py",
+                            "scripts/refiner/stages.py", "SKILL.md")),
+            "requirements": [], "standards": [AUTHORING]}
         context.update(getattr(args, "creation_context", {}))
         for path in args.spec:
             context["requirements"].append({"source": str(Path(path).resolve()), "content": Path(path).read_text(encoding="utf-8")})

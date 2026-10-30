@@ -39,6 +39,30 @@ observable completion check beside its inputs, outputs, failure behavior and
 requirement links. The human-readable plan shows that check as the step's success
 conclusion.
 
+Analysis and planning artifacts themselves follow packaged JSON Schemas. New business
+analysis uses `analysis/v2`: it explicitly records user intent/context, users and permission
+boundaries, scope and constraints, sourced atomic requirements with observable criteria,
+ordered workflow, complete risk applicability, assumptions, dependencies, blocking decisions
+and a detailed traceable scenario matrix. Planning uses `plan/v5` and `execution-plan/v1`:
+the structured work breakdown records ordered steps, goal/actions, inputs, schema-bound outputs
+and evidence, requirement/case links, dependencies, serial or parallel reason, Agent scope and
+join gate, exit conclusion, bounded failure behavior and recovery. Validators and independent
+reviews reject missing elements, broken links, unsafe concurrency and inconsistent acceptance
+plans before target Skill evaluation begins. The readable work plan is rendered from the
+validated structured plan.
+
+Each target Skill stage contract declares exactly one active version per stable schema ID. Package only the
+schemas and validators marked as needed at target runtime; never copy Refiner-only compatibility schemas into a
+target Skill. Increment a schema version only when its persisted format changes incompatibly, not for every Skill edit.
+Every consequential target workflow also follows the bounded [self-review protocol](references/self-review-protocol.md):
+freeze requirement-linked checks, cite evidence, allow one targeted correction, and stop if evidence still fails.
+The canonical self-review record shape is constrained by
+[`schemas/v1/self-review-record.schema.json`](schemas/v1/self-review-record.schema.json); persisted records must
+also be declared in the target Skill's stage contracts with their packaged validator.
+New Skills use Simplified Chinese for user-facing instructions and package text by default; preserve an existing
+Skill's language during refinement unless the user asks for translation. Keep machine identifiers and business
+outputs in their contractually required languages.
+
 Pause only when a material business decision or required permission cannot be inferred
 safely, the user asks to stop or plan only, a required local action or dependency is
 unavailable, a phase gate fails, or a configured budget is exhausted. Resolve reversible
@@ -66,6 +90,11 @@ for both creation and refinement, including evidence-first diagnosis and asking 
 user only for material decisions or local actions that cannot be resolved safely.
 Use the versioned [stage contracts and handoff artifacts](references/stage-contracts.md)
 to keep each phase's inputs, outputs, formats, hashes and context budget explicit.
+Apply the reusable [schema-backed Skill artifact standard](references/skill-stage-artifact-standard.md)
+to every target and to this Skill itself. Package versioned schemas under `schemas/`; never treat run records
+as schema definitions. The controller's current manifest schema is
+[schemas/v2/stages.schema.json](schemas/v2/stages.schema.json). Versioned schemas are grouped under
+`schemas/vN/`, with stable logical filenames such as `plan.schema.json`.
 
 Create a unique task directory outside the target, such as a project-local
 `.refiner-runs/<target>-<timestamp>/`, containing `inputs/` and a not-yet-created

@@ -9,19 +9,28 @@ request and a diagnostic manifest; it never silently truncates requirements or t
 
 ## Artifact formats
 
-Every run writes `stages.json` using the `skill-refiner.stages/v1` contract. Each
-stage declares its input and output paths, media types, current status, and discovered
-artifacts, a named `validation_gate` tied to the implementing validator/controller
-function, and the applicable `failure_states`. Existing artifacts are recorded with their UTF-8/file byte count and
-SHA-256. Glob entries describe a set of files, such as regression output from each
-repair round. Status is one of `pending`, `running`, `completed`, `blocked`, or
-`skipped`. `stages.json` is an index and audit record; the referenced files remain
-the canonical stage data. A stage cannot become `completed` until its required inputs
-and outputs exist. The final verification gate checks the versioned stage sequence,
-required artifacts and recorded input/output hashes; deleting or changing a handoff
-after a stage completes invalidates verification. Reused plans, drafts and their call
-transcripts may be optional in the new run, but present evidence is still hashed and
-checked.
+Every run writes `stages.json` using the package-owned
+[`skill-refiner.stages/v2` JSON Schema](../schemas/v2/stages.schema.json). The package also ships
+the [artifact inventory schema](../schemas/v1/artifact-record.schema.json), per-format schemas,
+and the executable validator in `scripts/refiner/artifact_validation.py`. `stages.json` records
+each schema ID, version, package-relative path, validator ID and SHA-256. It is an index and audit
+record; the referenced files remain the canonical stage data.
+
+Each stage declares schema-bound input and output paths, media types, a `validation_gate`, failure
+states, status, and discovered artifacts. JSON, Markdown, UTF-8 text and unified-diff outputs use
+versioned content schemas; JSON plans, reviews, analyses and repair responses use their dedicated
+packaged schemas and also pass their domain-specific validators. Heterogeneous glob outputs resolve
+to a content schema per file and keep the declaration's artifact-inventory contract. Artifact rows
+record byte count, content SHA-256 and validation result. Status is one of `pending`, `running`,
+`completed`, `blocked`, or `skipped`.
+
+On write capture, outputs are checked before a stage can complete; inputs and outputs are checked at
+the completion gate and again before handoff. Resume reloads the package schemas, compares their
+hashes and the complete stage contract, then revalidates every completed input/output before reuse.
+Final verification repeats those checks. Missing or changed schemas, invalid content, missing files
+or changed hashes block completion and reuse. A controller/schema change requires a new run, with
+the old evidence left intact. Optional reused plans, drafts and call transcripts may be absent in a
+new run, but any recorded evidence is still validated and hash-checked.
 
 For refinement runs, `run --resume-from RUN_DIRECTORY` reopens the same run directory.
 Before continuing, it checks the target and frozen-input manifests, controller/backend
@@ -115,9 +124,26 @@ requirement mapping. Both then show plan freezing, plan self-check and independe
 review, the plan gate, baseline, bounded repair with full regression, independent
 acceptance, and final verification/delivery.
 
-For business workflow analysis, each user-facing workflow step also has an observable
-completion_check. Render it beside the step's inputs, outputs, failure behavior and
-requirement links so a reader can tell what success means.
+Business analysis uses the packaged `analysis/v2` contract. It makes the intent and usage
+context, users/actors, in-scope and out-of-scope behavior, constraints, source-linked atomic
+requirements, ordered workflow, complete risk applicability, assumptions, dependencies and
+blocking decisions explicit. Every workflow step has an observable completion check beside
+its actors, preconditions, inputs, outputs, failure behavior and requirement/dependency links.
+The independent analysis review assesses every requirement, workflow step, scenario and risk
+dimension. A missing or inconsistent element blocks draft generation.
+
+Planning uses the packaged `plan/v5` and `execution-plan/v1` schemas. The structured execution
+plan is the source for its human-readable work-plan section; each step states its goal, actions,
+inputs, schema-bound outputs/evidence, linked requirements and cases, dependencies, serial or
+parallel schedule, Agent write scope, merge owner, join gate, exit evidence and bounded failure/
+recovery policy. Structural validation checks complete traceability, safe unique outputs, an
+acyclic ordered dependency graph, concurrency limits and nonoverlapping parallel write scopes.
+The held-out acceptance plan must retain the same execution plan and independently assess every
+step before the plan gate can pass.
+
+Target Skills also include the [bounded self-review protocol](self-review-protocol.md). Planning freezes each
+stage's self-check IDs against requirements and cases; normal and missing-evidence controls verify both pass and
+stop behavior. One targeted correction is allowed before a still-failing check becomes blocked.
 
 Show the executable controller Agent DAG with stable task IDs, roles, prerequisites, inputs,
 output artifacts, write scopes, concurrency limit, merge owner and join gate. For any host-
@@ -149,9 +175,9 @@ displayed as running.
 | Stage | Required input artifacts | Output artifacts and formats | Gate before handoff |
 |---|---|---|---|
 | Creation: inputs | User description, supplied requirements, auto-discovered project standards, and optional additional standards | `inputs.json` (JSON), `inputs/*.md` (UTF-8 Markdown/text) | Inputs frozen and hashed in the business contract |
-| Creation: analysis | Frozen business inputs | `analysis.json`, `analysis-review.json` (JSON), `business-analysis.md` (Markdown), `business.lock.json` (JSON) | Requirements cite user sources; workflow and normal/boundary/error applicability reviewed; material questions pause creation |
+| Creation: analysis | Frozen business inputs | `analysis.json`, `analysis-review.json` (JSON), `business-analysis.md` (Markdown), `business.lock.json` (JSON) | `analysis/v2` validates context, users/actors, scope, constraints, sourced atomic requirements, ordered workflow, full risk applicability, assumptions, dependencies and blocking decisions; review assesses every workflow/risk row; unresolved decisions pause creation |
 | Creation: first draft | Approved analysis and business lock | `drafts/` (Skill source files), `draft-manifest.json` (path-to-SHA-256 JSON) | Draft paths and static authoring checks pass |
-| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract and the actual plan schema | `test-plan.json`, `acceptance-plan.json`, `plan-controls/{development,acceptance}.json`, `plan-reviews/{development,acceptance}.json`, `oracle.lock.json` (JSON) | Current plan/v3 schema validates atomic criteria, detailed scenario links and every required field/enum; historical plan/v2 remains readable for verified resume; full positive/negative/auxiliary controls run; assets and requirement sources are audited; each suite has an independent review; only then can the plan gate pass |
+| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract and the actual plan schema | `test-plan.json`, `acceptance-plan.json`, `plan-controls/{development,acceptance}.json`, `plan-reviews/{development,acceptance}.json`, `oracle.lock.json` (JSON) | `plan/v5` validates atomic criteria, detailed scenario/control matrix, stage contracts and an execution plan with ordered steps, evidence-bound outputs, requirement/case links, dependency DAG, bounded concurrency, Agent scopes, exit criteria and failure/recovery rules; development and acceptance preserve the same work plan; full controls, asset/source audits and independent reviews must pass before the plan gate |
 | Refinement: baseline | Locked development plan and original Skill snapshot | `baseline/summary.json`, `baseline/standards.json` (JSON), backend logs/evidence | All configured engines return observed results; environment errors stop repair |
 | Repair | Failed-case results (including immutable per-attempt acceptance summaries after held-out failure), material standards findings, frozen requirements, prioritized source excerpts | `iterations/round-N/changes.json` (JSON), candidate Skill files, call request/response manifests | Each changed file cites a failed case or finding; protected tests and oracles cannot be edited |
 | Regression | Candidate, same frozen development suite, original passing-case set | `iterations/round-N/regression/summary.json`, `standards.json`, engine comparisons (JSON/Markdown) | No previously passing case regresses; each engine is judged separately |
@@ -162,6 +188,18 @@ displayed as running.
 The creation pipeline invokes the same refinement stages for the first draft, so a
 new Skill receives the same executable planning, baseline, repair, regression and
 independent acceptance gates as an existing Skill.
+
+The frozen development plan carries `stage_contracts` using
+`skill-refiner.skill-stage-contracts/v1`. It maps the target Skill's persisted/handoff artifacts to
+its own schema IDs, one active version per ID, files and validator implementations. A schema version changes
+only when its persisted format changes incompatibly. Historical controller formats are compatibility inputs to
+the Refiner and must not be copied into a target Skill. Independent acceptance must reuse
+the same frozen stage/schema map. The delivered candidate must contain every schema and validator
+marked as runtime-required; final verification parses those files as JSON Schemas and verifies their
+IDs and versions, and rejects undeclared or historical schema files left in its `schemas/` directory.
+Refiner's private compatibility registry remains inside the controller so old runs can resume, but is not
+packaged into other Skills. The authoring policy applies to every generated or refined Skill and to Refiner's
+own stages; see [schema-backed Skill artifact standard](skill-stage-artifact-standard.md).
 
 ## Context and extension rules
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 import re
 import yaml
+import jsonschema
 
 from .common import files
 
@@ -88,12 +90,24 @@ references. Explain important decisions; avoid arbitrary mandatory headings, len
 or adding examples/configuration where irrelevant. Prefer narrow fixes supported by failures.
 Use reusable scripts for demonstrated repeated deterministic work. Do not delete capabilities
 or weaken existing tests. Normative requirements come from supplied requirements and standards;
-the current implementation is evidence, not an infallible source of truth. For Skills that can
+the current implementation is evidence, not an infallible source of truth. When creating a new
+Skill, default all user-facing instructions and human-readable package text to Simplified Chinese,
+including SKILL.md, references, examples and script messages. Preserve code identifiers, schema
+property names, protocol literals, source quotations and the workflow's required business-output
+language; honor an explicit user language request. When refining an existing Skill, preserve its
+established language unless the user requests translation. Treat the chosen language as an
+acceptance requirement and include representative language checks in the frozen test plan. For Skills that can
 be blocked by a material business decision, local configuration, permissions, or an unavailable
 dependency, include a conditional help-request path: inspect evidence first, explain the concrete
 blocker, ask only for the smallest safe choice or action, and continue with fresh checks after
 the answer. Use a host-native input tool when available and conversation otherwise. Never request
 secrets in chat. Do not add unnecessary questions to deterministic workflows."""
+STAGE_ARTIFACT_STANDARD = (Path(__file__).resolve().parents[2] / "references" /
+                           "skill-stage-artifact-standard.md").read_text(encoding="utf-8")
+SELF_REVIEW_STANDARD = (Path(__file__).resolve().parents[2] / "references" /
+                        "self-review-protocol.md").read_text(encoding="utf-8")
+AUTHORING += "\n\n" + STAGE_ARTIFACT_STANDARD
+AUTHORING += "\n\n" + SELF_REVIEW_STANDARD
 
 
 def lint(root, expected_name=None):
@@ -134,6 +148,22 @@ def lint(root, expected_name=None):
     if "metadata" in front and (not isinstance(front["metadata"], dict) or
                                any(not isinstance(v, str) for v in front["metadata"].values())):
         add("format.metadata", "SKILL.md", "metadata must map string keys to string values")
+    schema_root = root / "schemas"
+    schema_files = sorted(schema_root.rglob("*.schema.json")) if schema_root.is_dir() else []
+    if not schema_files:
+        add("contract.schemas", "schemas", "Skill must package at least one versioned JSON Schema")
+    for schema_path in schema_files:
+        relative = str(schema_path.relative_to(root))
+        try:
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            if (not isinstance(schema, dict) or not isinstance(schema.get("$id"), str)
+                    or not schema["$id"].strip()
+                    or not isinstance(schema.get("x-schema-version"), str)
+                    or not re.fullmatch(r"v[0-9]+", schema["x-schema-version"])):
+                raise ValueError("Schema must be a JSON Schema object with a stable $id and x-schema-version")
+            jsonschema.validators.validator_for(schema).check_schema(schema)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, jsonschema.SchemaError) as exc:
+            add("contract.schema.invalid", relative, str(exc))
     if len(text.splitlines()) > 500:
         add("authoring.entrypoint", "SKILL.md", "Consider moving conditional detail to references", "warning")
     for p in files(root):

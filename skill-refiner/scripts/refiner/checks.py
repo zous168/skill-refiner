@@ -9,6 +9,7 @@ import itertools
 import tempfile
 
 from .common import PlanControlError, PlanValidationError, RefinerError, relative_path
+from .artifact_validation import schema_ref, validate_value
 
 
 def command_forms(command, root=None, literal=False):
@@ -380,12 +381,22 @@ def grade(case, response, root):
 
 
 def validate_plan(plan, root, max_cases=8, *, required_case_kinds=None,
-                  required_scenario_ids=None, expected_scenarios=None, expected_requirements=None):
+                  required_scenario_ids=None, expected_scenarios=None, expected_requirements=None,
+                  expected_execution_plan=None):
     """Validate real coverage, oracle paths and discriminating output assertions."""
-    from .schemas import PLAN, PLAN_V2
+    from .schemas import PLAN, PLAN_V2, PLAN_V3, PLAN_V4, PLAN_V5
     import jsonschema
-    legacy = plan.get("schema_version") == "skill-refiner.plan/v2"
-    jsonschema.validate(plan, PLAN_V2 if legacy else PLAN)
+    plan_version = plan.get("schema_version")
+    legacy = plan_version == "skill-refiner.plan/v2"
+    plan_schema = {"skill-refiner.plan/v2": PLAN_V2, "skill-refiner.plan/v3": PLAN_V3,
+                   "skill-refiner.plan/v4": PLAN_V4, "skill-refiner.plan/v5": PLAN_V5}.get(plan_version, PLAN)
+    jsonschema.validate(plan, plan_schema)
+    if plan_version in {"skill-refiner.plan/v4", "skill-refiner.plan/v5"}:
+        validate_skill_stage_contracts(plan["stage_contracts"], {row["id"] for row in plan["requirements"]})
+    if plan_version == "skill-refiner.plan/v5":
+        validate_execution_plan(plan["execution_plan"], plan)
+        if expected_execution_plan is not None and plan["execution_plan"] != expected_execution_plan:
+            raise RefinerError("Independent plan changed the frozen schema-validated execution_plan")
     if len(plan["cases"]) > max_cases:
         raise RefinerError(f"Plan exceeds {max_cases} cases")
     # Exact status/state labels are especially easy to invent when an agent
@@ -861,6 +872,147 @@ def validate_plan(plan, root, max_cases=8, *, required_case_kinds=None,
     if coverage_failures:
         raise PlanValidationError("Plan coverage self-check failed: " + json.dumps(coverage_failures, ensure_ascii=False), evidence)
     return {"status": "passed", "case_control_results": control_evidence}
+
+
+def validate_execution_plan(execution_plan, plan):
+    """Validate step traceability, the dependency DAG, safe parallel waves and recovery bounds."""
+    try:
+        validate_value(execution_plan, schema_ref("skill-refiner.execution-plan"),
+                       subject="execution plan")
+    except ValueError as exc:
+        raise RefinerError(str(exc)) from exc
+    steps = execution_plan["steps"]
+    step_ids = [step["id"] for step in steps]
+    orders = [step["order"] for step in steps]
+    if len(step_ids) != len(set(step_ids)):
+        raise RefinerError("Execution plan step IDs must be unique")
+    if sorted(orders) != list(range(1, len(steps) + 1)):
+        raise RefinerError("Execution plan order must be unique and contiguous from 1")
+    ordered = sorted(steps, key=lambda row: row["order"])
+    by_id = {step["id"]: step for step in ordered}
+    requirement_ids = {row["id"] for row in plan["requirements"]}
+    case_ids = {row["id"] for row in plan["cases"]}
+    covered_requirements, covered_cases = set(), set()
+    declared_schemas = {(row["id"], row["version"])
+                        for row in plan["stage_contracts"]["schemas"]}
+    output_paths = []
+    for step in ordered:
+        if not set(step["requirement_ids"]) <= requirement_ids:
+            raise RefinerError(f"Execution step {step['id']} references an unknown requirement")
+        if not set(step["case_ids"]) <= case_ids:
+            raise RefinerError(f"Execution step {step['id']} references an unknown test case")
+        covered_requirements.update(step["requirement_ids"])
+        covered_cases.update(step["case_ids"])
+        for dependency in step["depends_on"]:
+            if dependency not in by_id:
+                raise RefinerError(f"Execution step {step['id']} depends on unknown step {dependency}")
+            if by_id[dependency]["order"] >= step["order"]:
+                raise RefinerError(f"Execution dependency {dependency} -> {step['id']} is cyclic or out of order")
+        for output in step["outputs"]:
+            output_path = Path(output["path"])
+            if output_path.is_absolute() or ".." in output_path.parts or "\\" in output["path"]:
+                raise RefinerError(f"Execution step {step['id']} has unsafe output path {output['path']}")
+            if (output["schema_id"], output["schema_version"]) not in declared_schemas:
+                raise RefinerError(f"Execution step {step['id']} output {output['path']} references an undeclared schema")
+            output_paths.append(output["path"].casefold())
+        failure = step["failure_policy"]
+        if failure["action"] == "stop" and failure["recovery_policy"] != "blocked":
+            raise RefinerError(f"Execution step {step['id']} stops but does not record a blocked recovery policy")
+    missing_requirements = sorted(requirement_ids - covered_requirements)
+    missing_cases = sorted(case_ids - covered_cases)
+    if missing_requirements or missing_cases:
+        raise RefinerError("Execution plan omits requirements or cases: " + json.dumps(
+            {"missing_requirement_ids": missing_requirements, "missing_case_ids": missing_cases},
+            ensure_ascii=False))
+    if len(output_paths) != len(set(output_paths)):
+        raise RefinerError("Execution plan output artifact paths must be unique")
+    waves = {}
+    for step in ordered:
+        if step["execution_mode"] == "parallel":
+            waves.setdefault(step["parallel_wave"], []).append(step)
+    if waves and execution_plan["max_parallel_agents"] == 1:
+        raise RefinerError("Execution plan schedules parallel work with max_parallel_agents=1")
+    for wave_id, members in waves.items():
+        if len(members) < 2:
+            raise RefinerError(f"Parallel wave {wave_id} must contain at least two independent tasks")
+        if len(members) > execution_plan["max_parallel_agents"]:
+            raise RefinerError(f"Parallel wave {wave_id} exceeds max_parallel_agents")
+        member_ids = {step["id"] for step in members}
+        occupied = []
+        for step in members:
+            if member_ids.intersection(step["depends_on"]):
+                raise RefinerError(f"Parallel wave {wave_id} contains dependent tasks")
+            for scope in step["agent"]["write_scope"]:
+                normalized = scope.replace("\\", "/").strip("/").casefold()
+                for prior, prior_step in occupied:
+                    if (normalized == prior or normalized.startswith(prior + "/")
+                            or prior.startswith(normalized + "/")):
+                        raise RefinerError(f"Parallel tasks {prior_step} and {step['id']} have overlapping write scopes")
+                occupied.append((normalized, step["id"]))
+
+
+def validate_skill_stage_contracts(contract, requirement_ids):
+    """Check cross-Skill phase and artifact schema links after structural validation."""
+    try:
+        validate_value(contract, schema_ref("skill-refiner.skill-stage-contracts"),
+                       subject="Skill stage contracts")
+    except ValueError as exc:
+        raise RefinerError(str(exc)) from exc
+    stages = contract["stages"]
+    stage_ids = [stage["id"] for stage in stages]
+    if len(stage_ids) != len(set(stage_ids)):
+        raise RefinerError("Skill stage contracts contain duplicate stage IDs")
+    schemas = contract["schemas"]
+    schema_ids = [row["id"] for row in schemas]
+    if len(schema_ids) != len(set(schema_ids)):
+        raise RefinerError(
+            "Skill stage contracts must declare exactly one active version per logical schema ID; "
+            "remove historical or compatibility versions from the target Skill contract"
+        )
+    schema_keys = [(row["id"], row["version"]) for row in schemas]
+    if len(schema_keys) != len(set(schema_keys)):
+        raise RefinerError("Skill stage contracts contain duplicate schema id/version pairs")
+    schema_map = {(row["id"], row["version"]): row for row in schemas}
+    required_points = {"after_generation", "before_handoff", "on_resume", "final_verification"}
+    used_schemas = set()
+    for stage in stages:
+        unknown_requirements = set(stage["requirement_ids"]) - requirement_ids
+        if unknown_requirements:
+            raise RefinerError(f"Stage {stage['id']} references unknown requirements: "
+                               + ", ".join(sorted(unknown_requirements)))
+        if set(stage["validation_points"]) != required_points:
+            raise RefinerError(f"Stage {stage['id']} must validate after generation, before handoff, "
+                               "on resume, and during final verification")
+        output_paths = [row["path"] for row in stage["outputs"]]
+        if len(output_paths) != len(set(output_paths)):
+            raise RefinerError(f"Stage {stage['id']} declares duplicate output paths")
+        for artifact in [*stage["inputs"], *stage["outputs"]]:
+            key = (artifact["schema_id"], artifact["schema_version"])
+            schema = schema_map.get(key)
+            if schema is None:
+                raise RefinerError(f"Stage {stage['id']} artifact {artifact['path']} references an undeclared schema")
+            used_schemas.add(key)
+            path = Path(artifact["path"])
+            if path.is_absolute() or ".." in path.parts:
+                raise RefinerError(f"Stage {stage['id']} artifact path is unsafe: {artifact['path']}")
+            schema_path = Path(schema["path"])
+            validator_path = Path(schema["validator_path"])
+            if (schema_path.is_absolute() or ".." in schema_path.parts
+                    or validator_path.is_absolute() or ".." in validator_path.parts):
+                raise RefinerError(f"Skill schema path is unsafe: {schema['path']}")
+            if (len(schema_path.parts) < 3 or schema_path.parts[0] != "schemas"
+                    or schema_path.parts[1] != schema["version"]):
+                raise RefinerError(
+                    f"Skill schema path version directory must match its declared version: "
+                    f"{schema['path']} vs {schema['version']}"
+                )
+            if schema.get("media_type") and artifact["media_type"] != schema["media_type"]:
+                raise RefinerError(f"Stage {stage['id']} artifact {artifact['path']} media type conflicts "
+                                   f"with schema {schema['id']}")
+    unused = sorted(set(schema_keys) - used_schemas)
+    if unused:
+        raise RefinerError("Skill stage contract declares unused schemas: "
+                           + ", ".join(f"{schema_id}@{version}" for schema_id, version in unused))
 
 
 def grader_main(case_path):

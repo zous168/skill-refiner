@@ -4,14 +4,23 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import fnmatch
+import json
 import mimetypes
 from pathlib import Path
 
 from .common import read_json, write_json
+from .artifact_validation import (all_schema_refs, content_schema_id, schema_ref,
+                                 validate_artifact, validate_contract_declaration,
+                                 validate_stage_manifest, schema_ref_compatible,
+                                 schema_refs_compatible)
 
 
 def _a(path, media_type=None, glob=False, required=True):
-    return {"path": path, "media_type": media_type, "glob": glob, "required": required}
+    contract_id = ("skill-refiner.artifact-record" if glob or "*" in path
+                   else content_schema_id(Path(path), media_type))
+    return {"path": path, "media_type": media_type, "glob": glob, "required": required,
+            "contract_id": contract_id,
+            "content_policy": "by_media_type" if contract_id == "skill-refiner.artifact-record" else "fixed"}
 
 
 def _calls(role):
@@ -22,6 +31,20 @@ def _calls(role):
                                      ("request-manifest.json", "application/json"),
                                      ("transmission.txt", "text/plain"),
                                      ("response.json", "application/json"))]
+
+
+def _artifact_declarations_compatible(stored, current):
+    if not isinstance(stored, list) or len(stored) != len(current):
+        return False
+    for old, new in zip(stored, current):
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return False
+        if ({key: value for key, value in old.items() if key != "schema_ref"}
+                != {key: value for key, value in new.items() if key != "schema_ref"}):
+            return False
+        if not schema_ref_compatible(old.get("schema_ref"), new.get("schema_ref")):
+            return False
+    return True
 
 
 CONTRACTS = {
@@ -140,9 +163,13 @@ def collect_artifacts(root, declarations):
                               ".sh": "text/x-shellscript", ".txt": "text/plain"}.get(path.suffix)
             if media_type is None:
                 media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            schema_id = content_schema_id(path, media_type)
+            reference = schema_ref(schema_id)
             results.append({"path": path.relative_to(root).as_posix(),
                             "media_type": media_type, "bytes": len(data),
-                            "sha256": hashlib.sha256(data).hexdigest()})
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                            "schema_ref": reference,
+                            "validation": {"status": "pending", "validator_id": reference["validator_id"]}})
     return results, missing
 
 
@@ -156,12 +183,26 @@ class StageManifest:
             if not self.path.is_file():
                 raise ValueError("Cannot resume without stages.json")
             self.data = read_json(self.path)
-            expected_ids = [item["id"] for item in CONTRACTS[mode]]
-            if (self.data.get("schema_version") != "skill-refiner.stages/v1"
+            expected = self._bound_contract(mode)
+            expected_ids = [item["id"] for item in expected]
+            expected_refs = self._validate_manifest_schema(self.data)
+            if (self.data.get("schema_version") != "skill-refiner.stages/v2"
                     or self.data.get("mode") != mode
                     or self.data.get("run_id") != self.root.name
                     or [row.get("id") for row in self.data.get("stages", [])] != expected_ids):
                 raise ValueError("Cannot resume: stage manifest does not match this run contract")
+            for row, contract in zip(self.data["stages"], expected):
+                for field in ("inputs", "outputs", "validation_gate", "failure_states"):
+                    compatible = (
+                        _artifact_declarations_compatible(row.get(field), contract[field])
+                        if field in {"inputs", "outputs"} else row.get(field) == contract[field]
+                    )
+                    if not compatible:
+                        raise ValueError(f"Cannot resume: stage {row.get('id')} {field} contract changed")
+                    if field in {"inputs", "outputs"}:
+                        # Canonicalize old flat schema paths so the next save writes vN paths.
+                        row[field] = contract[field]
+            self.data["schema_refs"] = expected_refs
             if self.data.get("active_stage") not in {None, *expected_ids}:
                 raise ValueError("Cannot resume: stage manifest has an unknown active stage")
             for stage in self.data["stages"]:
@@ -177,10 +218,9 @@ class StageManifest:
                         if (relative.is_absolute() or not path.is_relative_to(self.root)
                                 or not path.is_file()):
                             raise ValueError(f"Cannot resume: completed stage {stage['id']} artifact is missing or unsafe")
-                        data = path.read_bytes()
-                        if (len(data) != artifact.get("bytes")
-                                or hashlib.sha256(data).hexdigest() != artifact.get("sha256")):
-                            raise ValueError(f"Cannot resume: completed stage {stage['id']} artifact changed: {relative}")
+                        declarations = stage["outputs" if field == "artifacts" else "inputs"]
+                        self._validate_artifact(stage, field, path, artifact, declarations,
+                                                require_recorded_pass=True)
             active = self.data.get("active_stage")
             if active:
                 stage = next(row for row in self.data["stages"] if row["id"] == active)
@@ -201,16 +241,90 @@ class StageManifest:
             self.data["last_resumed_at"] = _now()
             self._save()
             return
-        self.data = {"schema_version": "skill-refiner.stages/v1", "run_id": self.root.name,
+        self.data = {"schema_version": "skill-refiner.stages/v2", "run_id": self.root.name,
                      "mode": mode, "status": "running", "active_stage": None,
+                     "schema_refs": all_schema_refs(),
                      "created_at": _now(), "updated_at": _now(),
                      "stages": [{**item, "status": "pending", "started_at": None,
-                                 "completed_at": None, "artifacts": [], "missing_outputs": []}
-                                for item in CONTRACTS[mode]]}
+                                 "completed_at": None, "artifacts": [], "input_artifacts": [],
+                                 "missing_outputs": [], "missing_inputs": []}
+                                for item in self._bound_contract(mode)]}
         self._save()
+
+    @staticmethod
+    def _bound_contract(mode=None):
+        mode = mode or getattr(StageManifest, "_mode", None)
+        if mode not in CONTRACTS:
+            raise ValueError("Unknown stage contract mode")
+        stages = json.loads(json.dumps(CONTRACTS[mode]))
+        for stage in stages:
+            for field in ("inputs", "outputs"):
+                for declaration in stage[field]:
+                    declaration["schema_ref"] = schema_ref(declaration["contract_id"])
+                    validate_contract_declaration(declaration, subject=f"{stage['id']} {field} {declaration['path']}")
+        return stages
+
+    @staticmethod
+    def _validate_manifest_schema(data):
+        expected_refs = all_schema_refs()
+        if not schema_refs_compatible(data.get("schema_refs"), expected_refs):
+            raise ValueError("Stage schema registry or schema hash changed; this run cannot be resumed")
+        manifest_ref = next((item for item in expected_refs if item["id"] == "skill-refiner.stages"), None)
+        validate_stage_manifest(data, manifest_ref)
+        return expected_refs
+
+    def _contract(self, stage_id):
+        return next(row for row in self.data["stages"] if row["id"] == stage_id)
+
+    @staticmethod
+    def _declaration_for(path, declarations):
+        relative = Path(path).as_posix()
+        for declaration in declarations:
+            pattern = declaration["path"].replace("\\", "/")
+            if declaration.get("glob"):
+                pattern_parts = tuple(part for part in pattern.split("/") if part not in {"", "."})
+                path_parts = tuple(relative.split("/"))
+
+                def matches(path_parts, pattern_parts):
+                    if not pattern_parts:
+                        return not path_parts
+                    if pattern_parts[0] == "**":
+                        return (matches(path_parts, pattern_parts[1:])
+                                or bool(path_parts) and matches(path_parts[1:], pattern_parts))
+                    return (bool(path_parts) and fnmatch.fnmatchcase(path_parts[0], pattern_parts[0])
+                            and matches(path_parts[1:], pattern_parts[1:]))
+
+                matched = matches(path_parts, pattern_parts)
+            else:
+                matched = relative == pattern
+            if matched:
+                return declaration
+        raise ValueError(f"Artifact {relative} is not declared by this stage contract")
+
+    def _validate_artifact(self, stage, field, path, artifact, declarations, *, require_recorded_pass=False):
+        relative = artifact.get("path", "")
+        declaration = self._declaration_for(relative, declarations)
+        expected_id = declaration["contract_id"]
+        if expected_id == "skill-refiner.artifact-record":
+            expected_id = None
+        if require_recorded_pass and artifact.get("validation", {}).get("status") != "passed":
+            raise ValueError(f"Stage {stage['id']} {field} artifact {relative} has no passing validation record")
+        validate_artifact(path, self.root, artifact, expected_contract_id=expected_id)
+
+    def _validate_inventory(self, stage, field, *, require_recorded_pass=False):
+        declarations = stage["outputs" if field == "artifacts" else "inputs"]
+        for artifact in stage.get(field, []):
+            relative = Path(artifact.get("path", ""))
+            path = (self.root / relative).resolve()
+            self._validate_artifact(stage, field, path, artifact, declarations,
+                                    require_recorded_pass=require_recorded_pass)
+
+    def _bind_inventory(self, stage, field):
+        self._validate_inventory(stage, field)
 
     def _save(self):
         self.data["updated_at"] = _now()
+        self._validate_manifest_schema(self.data)
         write_json(self.path, self.data)
 
     def is_completed(self, stage_id):
@@ -242,10 +356,12 @@ class StageManifest:
         stage = next(row for row in self.data["stages"] if row["id"] == stage_id)
         self._capture_outputs(stage)
         self._assert_outputs(stage)
-        stage["status"] = "completed"
-        stage["completed_at"] = _now()
+        self._bind_inventory(stage, "artifacts")
         self._capture_inputs(stage)
         self._assert_inputs(stage)
+        self._bind_inventory(stage, "input_artifacts")
+        stage["status"] = "completed"
+        stage["completed_at"] = _now()
         if self.data.get("active_stage") == stage_id:
             self.data["active_stage"] = None
         self._save()
@@ -255,12 +371,16 @@ class StageManifest:
             stage = next(row for row in self.data["stages"] if row["id"] == stage_id)
             if stage["status"] == "running":
                 self._capture_outputs(stage)
+                self._bind_inventory(stage, "artifacts")
                 self._save()
                 return
         for row in self.data["stages"]:
             if row["id"] == self.data.get("active_stage") and row["status"] == "running":
                 self._capture_outputs(row)
                 self._assert_outputs(row)
+                self._bind_inventory(row, "artifacts")
+                self._assert_inputs(row)
+                self._bind_inventory(row, "input_artifacts")
                 row["status"] = "completed"
                 row["completed_at"] = _now()
         stage = next(row for row in self.data["stages"] if row["id"] == stage_id)
@@ -272,9 +392,11 @@ class StageManifest:
             self.data["active_stage"] = stage_id
             self._capture_inputs(stage)
             self._assert_inputs(stage)
+            self._bind_inventory(stage, "input_artifacts")
         else:
             self._capture_inputs(stage)
             self._assert_inputs(stage)
+            self._bind_inventory(stage, "input_artifacts")
             stage["status"] = "running"
             stage["started_at"] = stage["started_at"] or _now()
             self.data["active_stage"] = stage_id
@@ -290,6 +412,9 @@ class StageManifest:
                 self._capture_outputs(stage)
                 if successful:
                     self._assert_outputs(stage)
+                    self._bind_inventory(stage, "artifacts")
+                    self._assert_inputs(stage)
+                    self._bind_inventory(stage, "input_artifacts")
                 stage["status"] = "completed" if successful else "blocked"
                 stage["completed_at"] = _now()
             elif stage["status"] == "pending":
@@ -308,13 +433,19 @@ def verify_stage_manifest(root, *, mode, run_status, allow_active_verification=F
         raise ValueError("Completion evidence missing: stages.json")
     from .common import read_json
     data = read_json(manifest_path)
-    if data.get("schema_version") != "skill-refiner.stages/v1" or data.get("mode") != mode:
+    StageManifest._validate_manifest_schema(data)
+    if data.get("schema_version") != "skill-refiner.stages/v2" or data.get("mode") != mode:
         raise ValueError("Stage manifest schema or mode mismatch")
     rows = data.get("stages", [])
     by_id = {stage.get("id"): stage for stage in rows}
-    expected_ids = [stage["id"] for stage in CONTRACTS[mode]]
+    expected_contract = StageManifest._bound_contract(mode)
+    expected_ids = [stage["id"] for stage in expected_contract]
     if [stage.get("id") for stage in rows] != expected_ids:
         raise ValueError("Stage manifest does not match the versioned stage contract")
+    for stage, contract in zip(rows, expected_contract):
+        for field in ("inputs", "outputs", "validation_gate", "failure_states"):
+            if stage.get(field) != contract[field]:
+                raise ValueError(f"Stage {stage['id']} {field} contract changed")
 
     active = data.get("active_stage")
     pre_finish = allow_active_verification and active == "verification" and by_id["verification"].get("status") == "running"
@@ -355,10 +486,14 @@ def verify_stage_manifest(root, *, mode, run_status, allow_active_verification=F
                     path = (root / relative).resolve()
                     if relative.is_absolute() or not path.is_relative_to(root) or not path.is_file():
                         raise ValueError(f"Stage {stage_id} artifact is missing or outside its run directory")
-                    data_bytes = path.read_bytes()
-                    if (len(data_bytes) != artifact.get("bytes")
-                            or hashlib.sha256(data_bytes).hexdigest() != artifact.get("sha256")):
-                        raise ValueError(f"Stage {stage_id} {field} artifact hash changed: {relative}")
+                    declarations = stage["outputs" if field == "artifacts" else "inputs"]
+                    declaration = StageManifest._declaration_for(relative, declarations)
+                    expected_id = declaration["contract_id"]
+                    if expected_id == "skill-refiner.artifact-record":
+                        expected_id = None
+                    if artifact.get("validation", {}).get("status") != "passed":
+                        raise ValueError(f"Stage {stage_id} {field} artifact has no passing schema validation: {relative}")
+                    validate_artifact(path, root, artifact, expected_contract_id=expected_id)
             for field, declarations in (("artifacts", stage["outputs"]),
                                         ("input_artifacts", stage["inputs"])):
                 paths = {item["path"] for item in stage[field]}

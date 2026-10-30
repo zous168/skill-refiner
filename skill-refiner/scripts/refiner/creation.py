@@ -15,7 +15,7 @@ from .agent import Agent
 from .common import Cancelled, RefinerError, digest, manifest, read_json, snapshot, write_json
 from .pipeline import apply_changes, run as refine
 from .profiles import load_config
-from .schemas import PLAN, REQUIREMENTS, REVIEW, SCENARIO_INTENT
+from .schemas import PLAN, REQUIREMENTS, REVIEW, RISK_DIMENSIONS, SCENARIO_INTENT
 from .standards import AUTHORING, discover_project_standards, lint
 from .stages import StageManifest, CREATE_EVENTS
 from .plan import write_test_scenarios, write_work_plan
@@ -52,7 +52,7 @@ labels alone. Do not require an exact newline count or extra features absent fro
 requirements. Direct managed command success is already based on actual parsed exit status zero;
 observer invocation success alone does not establish the observed script's exit status.
 """
-ANALYSIS = {
+ANALYSIS_V1 = {
     "type": "object", "additionalProperties": False,
     "required": ["name", "goal", "requirements", "workflow", "scenarios", "assumptions",
                  "external_dependencies", "blocking_questions"],
@@ -69,7 +69,7 @@ ANALYSIS = {
         "assumptions": STRINGS, "external_dependencies": STRINGS, "blocking_questions": STRINGS,
     },
 }
-ANALYSIS_REVIEW = {
+ANALYSIS_REVIEW_V1 = {
     **REVIEW,
     "properties": {**REVIEW["properties"], "requirement_assessments": {
         "type": "array", "minItems": 1, "items": {
@@ -89,6 +89,118 @@ ANALYSIS_REVIEW = {
     },
     "required": ["approved", "issues", "requirement_assessments", "scenario_assessments"],
 }
+ANALYSIS_V2 = {
+    "type": "object", "additionalProperties": False,
+    "required": ["schema_version", "name", "goal", "context", "scope", "actors", "requirements",
+                 "workflow", "scenarios", "risk_assessments", "assumptions", "external_dependencies",
+                 "blocking_questions"],
+    "properties": {
+        "schema_version": {"const": "skill-refiner.analysis/v2"},
+        "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "goal": {"type": "string", "minLength": 8},
+        "context": {"type": "object", "additionalProperties": False,
+            "required": ["user_intent", "usage_context", "primary_user_ids"],
+            "properties": {"user_intent": {"type": "string", "minLength": 8},
+                           "usage_context": {"type": "string", "minLength": 8},
+                           "primary_user_ids": IDS}},
+        "scope": {"type": "object", "additionalProperties": False,
+            "required": ["in_scope", "out_of_scope", "constraints"],
+            "properties": {"in_scope": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+                           "out_of_scope": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+                           "constraints": STRINGS}},
+        "actors": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "role", "needs", "permission_boundary"],
+            "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                           "role": {"type": "string", "minLength": 3},
+                           "needs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+                           "permission_boundary": {"type": "string", "minLength": 8}}}},
+        "requirements": REQUIREMENTS,
+        "workflow": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "order", "action", "actor_ids", "preconditions", "inputs", "outputs",
+                         "completion_check", "failure_behavior", "requirement_ids", "dependency_ids"],
+            "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                           "order": {"type": "integer", "minimum": 1},
+                           "action": {"type": "string", "minLength": 3},
+                           "actor_ids": IDS,
+                           "preconditions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+                           "inputs": {"type": "string", "minLength": 3},
+                           "outputs": {"type": "string", "minLength": 3},
+                           "completion_check": {"type": "string", "minLength": 8},
+                           "failure_behavior": {"type": "string", "minLength": 8},
+                           "requirement_ids": IDS,
+                           "dependency_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string"}}}}},
+        "scenarios": {"type": "array", "minItems": 3, "items": SCENARIO_INTENT},
+        "risk_assessments": {"type": "array", "minItems": len(RISK_DIMENSIONS), "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["dimension", "applicable", "basis", "scenario_ids"],
+            "properties": {"dimension": {"enum": RISK_DIMENSIONS}, "applicable": {"type": "boolean"},
+                           "basis": {"type": "string", "minLength": 12},
+                           "scenario_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string"}}},
+            "allOf": [{"if": {"properties": {"applicable": {"const": True}}},
+                       "then": {"properties": {"scenario_ids": {"minItems": 1}}}},
+                      {"if": {"properties": {"applicable": {"const": False}}},
+                       "then": {"properties": {"scenario_ids": {"maxItems": 0}}}}]}},
+        "assumptions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "statement", "impact", "validation"],
+            "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                           "statement": {"type": "string", "minLength": 3},
+                           "impact": {"type": "string", "minLength": 3},
+                           "validation": {"type": "string", "minLength": 3}}}},
+        "external_dependencies": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "name", "purpose", "required", "availability", "failure_behavior", "requirement_ids"],
+            "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                           "name": {"type": "string", "minLength": 2},
+                           "purpose": {"type": "string", "minLength": 5},
+                           "required": {"type": "boolean"},
+                           "availability": {"type": "string", "minLength": 5},
+                           "failure_behavior": {"type": "string", "minLength": 8},
+                           "requirement_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string"}}}}},
+        "blocking_questions": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["id", "question", "decision_owner", "impact"],
+            "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                           "question": {"type": "string", "minLength": 8},
+                           "decision_owner": {"type": "string", "minLength": 2},
+                           "impact": {"type": "string", "minLength": 8}}}},
+    },
+}
+ANALYSIS = ANALYSIS_V2
+ANALYSIS_REVIEW_V2 = {
+    **ANALYSIS_REVIEW_V1,
+    "required": ANALYSIS_REVIEW_V1["required"] + ["schema_version", "context_scope_assessment",
+        "workflow_assessments", "risk_assessments", "dependencies_assessed", "blocking_decisions_actionable"],
+    "properties": {**ANALYSIS_REVIEW_V1["properties"],
+        "schema_version": {"const": "skill-refiner.analysis-review/v2"},
+        "context_scope_assessment": {"type": "object", "additionalProperties": False,
+            "required": ["intent_grounded", "actors_complete", "scope_clear", "constraints_complete", "basis"],
+            "properties": {"intent_grounded": {"type": "boolean"}, "actors_complete": {"type": "boolean"},
+                           "scope_clear": {"type": "boolean"}, "constraints_complete": {"type": "boolean"},
+                           "basis": {"type": "string", "minLength": 12}}},
+        "workflow_assessments": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["workflow_id", "order_and_actors_clear", "inputs_outputs_complete",
+                         "completion_and_failure_testable", "requirement_traceable", "basis"],
+            "properties": {"workflow_id": {"type": "string"},
+                           "order_and_actors_clear": {"type": "boolean"},
+                           "inputs_outputs_complete": {"type": "boolean"},
+                           "completion_and_failure_testable": {"type": "boolean"},
+                           "requirement_traceable": {"type": "boolean"},
+                           "basis": {"type": "string", "minLength": 12}}}},
+        "risk_assessments": {"type": "array", "minItems": len(RISK_DIMENSIONS), "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["dimension", "applicability_justified", "scenario_links_complete", "basis"],
+            "properties": {"dimension": {"enum": RISK_DIMENSIONS}, "applicability_justified": {"type": "boolean"},
+                           "scenario_links_complete": {"type": "boolean"},
+                           "basis": {"type": "string", "minLength": 12}}}},
+        "dependencies_assessed": {"type": "boolean"},
+        "blocking_decisions_actionable": {"type": "boolean"},
+    },
+}
+ANALYSIS_REVIEW = ANALYSIS_REVIEW_V2
 DRAFT = {
     "type": "object", "additionalProperties": False,
     "required": ["implementation_notes", "files"],
@@ -107,7 +219,11 @@ DRAFT_INSTRUCTION = (
     'support scripts wherever deterministic business work benefits from them. Implement the actual workflow, '
     'not placeholders, TODOs, mock results, hardcoded inputs or documentation-only scaffolding. Use the local '
     'runtime and standard library where sufficient. Define concrete invocation, input/output and error '
-    'contracts consistent with the user request; record nonmaterial assumptions. A local script should '
+    'contracts consistent with the user request; record nonmaterial assumptions. Write all user-facing Skill '
+    'instructions and human-readable package text in Simplified Chinese by default, including SKILL.md, references, '
+    'examples, prompts, and user-visible script messages. Keep code identifiers, schema property names, protocol '
+    'literals, source quotations, and business output in the language explicitly required by the workflow. Honor an '
+    'explicit user language requirement when it differs. A local script should '
     'return machine-checkable results and instructions must require using it when it implements the workflow. '
     'Preserve the requested error output and exit-status contract rather than inventing one. '
     'When a missing business choice, permission, runtime setup, configuration, or dependency can materially '
@@ -118,7 +234,9 @@ DRAFT_INSTRUCTION = (
     'Do not add questions for deterministic details that can be handled as explicit assumptions. '
     'Do not instruct an executor to edit its installed Skill. Do not create tests/evals, graders, credentials, '
     'global configuration or fabricated service adapters. Independent tests are generated later. Every file '
-    'must cite valid requirement IDs.'
+    'must cite valid requirement IDs. Include the bounded self-review protocol in SKILL.md: freeze requirement-linked '
+    'checks before execution, cite evidence at handoff/final response, allow one targeted correction, then stop '
+    'blocked if evidence still fails. Do not add self-review loops or expose hidden chain-of-thought.'
 )
 
 
@@ -139,7 +257,11 @@ def normalize_draft(draft, name):
 
 def validate_analysis(analysis, requested_name=None, source_ids=None):
     import jsonschema
-    jsonschema.validate(analysis, ANALYSIS)
+    version = analysis.get("schema_version")
+    if version not in (None, "skill-refiner.analysis/v1", "skill-refiner.analysis/v2"):
+        raise RefinerError(f"Unsupported business analysis schema version: {version}")
+    schema = ANALYSIS_V1 if version in (None, "skill-refiner.analysis/v1") else ANALYSIS_V2
+    jsonschema.validate(analysis, schema)
     if requested_name and analysis["name"] != requested_name:
         raise RefinerError("Business analysis changed the requested Skill name")
     ids = [r["id"] for r in analysis["requirements"]]
@@ -187,11 +309,67 @@ def validate_analysis(analysis, requested_name=None, source_ids=None):
     if not required_criteria <= covered_criteria:
         raise RefinerError("Scenario matrix omits required acceptance criteria: " +
                            ", ".join(sorted(required_criteria - covered_criteria)))
+    if version == "skill-refiner.analysis/v2":
+        actor_ids = [row["id"] for row in analysis["actors"]]
+        if len(actor_ids) != len(set(actor_ids)):
+            raise RefinerError("Analysis actor IDs must be unique")
+        if not set(analysis["context"]["primary_user_ids"]) <= set(actor_ids):
+            raise RefinerError("Analysis context references an unknown primary user/actor")
+        dependency_ids = [row["id"] for row in analysis["external_dependencies"]]
+        if len(dependency_ids) != len(set(dependency_ids)):
+            raise RefinerError("External dependency IDs must be unique")
+        for dependency in analysis["external_dependencies"]:
+            if not set(dependency["requirement_ids"]) <= set(ids):
+                raise RefinerError(f"Dependency {dependency['id']} references an unknown requirement")
+        workflow_ids = [row["id"] for row in analysis["workflow"]]
+        workflow_orders = [row["order"] for row in analysis["workflow"]]
+        if len(workflow_ids) != len(set(workflow_ids)):
+            raise RefinerError("Workflow step IDs must be unique")
+        if sorted(workflow_orders) != list(range(1, len(workflow_orders) + 1)):
+            raise RefinerError("Workflow order values must be unique and contiguous from 1")
+        for step in analysis["workflow"]:
+            if (not set(step["actor_ids"]) <= set(actor_ids)
+                    or not set(step["dependency_ids"]) <= set(dependency_ids)):
+                raise RefinerError(f"Workflow step {step['id']} references an unknown actor or dependency")
+        risk_rows = analysis["risk_assessments"]
+        assessed = [row["dimension"] for row in risk_rows]
+        if len(assessed) != len(set(assessed)) or set(assessed) != set(RISK_DIMENSIONS):
+            raise RefinerError("Risk assessment must assess every supported risk dimension exactly once")
+        scenarios_by_id = {row["id"]: row for row in analysis["scenarios"]}
+        for risk in risk_rows:
+            linked = [scenarios_by_id.get(sid) for sid in risk["scenario_ids"]]
+            if any(row is None for row in linked):
+                raise RefinerError(f"Risk dimension {risk['dimension']} references an unknown scenario")
+            if risk["applicable"]:
+                if any(not row["applicable"] or risk["dimension"] not in row["detail"]["risk_dimensions"]
+                       for row in linked):
+                    raise RefinerError(f"Risk dimension {risk['dimension']} links to an inapplicable or mismatched scenario")
+                expected_linked = {row["id"] for row in analysis["scenarios"] if row["applicable"]
+                                   and risk["dimension"] in row["detail"]["risk_dimensions"]}
+                if set(risk["scenario_ids"]) != expected_linked:
+                    raise RefinerError(f"Risk dimension {risk['dimension']} must link every applicable matching scenario")
+            elif any(risk["dimension"] in row["detail"]["risk_dimensions"]
+                     for row in analysis["scenarios"] if row["applicable"]):
+                raise RefinerError(f"Risk dimension {risk['dimension']} is marked inapplicable but appears in a scenario")
+        risk_map = {row["dimension"]: row for row in risk_rows}
+        for scenario in analysis["scenarios"]:
+            if not scenario["applicable"]:
+                continue
+            for dimension in scenario["detail"]["risk_dimensions"]:
+                risk = risk_map[dimension]
+                if not risk["applicable"] or scenario["id"] not in risk["scenario_ids"]:
+                    raise RefinerError(f"Scenario {scenario['id']} conflicts with risk applicability for {dimension}")
+        assumption_ids = [row["id"] for row in analysis["assumptions"]]
+        decision_ids = [row["id"] for row in analysis["blocking_questions"]]
+        if len(assumption_ids) != len(set(assumption_ids)) or len(decision_ids) != len(set(decision_ids)):
+            raise RefinerError("Assumption and blocking-decision IDs must be unique")
 
 
 def validate_analysis_review(review, analysis):
     import jsonschema
-    jsonschema.validate(review, ANALYSIS_REVIEW)
+    version = analysis.get("schema_version")
+    review_schema = ANALYSIS_REVIEW_V2 if version == "skill-refiner.analysis/v2" else ANALYSIS_REVIEW_V1
+    jsonschema.validate(review, review_schema)
     rows = review["requirement_assessments"]
     expected = {r["id"] for r in analysis["requirements"]}
     if len(rows) != len(expected) or {r["requirement_id"] for r in rows} != expected:
@@ -208,19 +386,60 @@ def validate_analysis_review(review, analysis):
                       for row in scenarios)
     if review["approved"] and not (req_ok and scenario_ok):
         raise RefinerError("Analysis approval contradicts requirement or scenario completeness assessments")
+    if version == "skill-refiner.analysis/v2":
+        context = review["context_scope_assessment"]
+        if review["approved"] and not all(context[key] for key in (
+                "intent_grounded", "actors_complete", "scope_clear", "constraints_complete")):
+            raise RefinerError("Analysis approval contradicts context or scope assessment")
+        workflow_rows = review["workflow_assessments"]
+        expected_workflows = {row["id"] for row in analysis["workflow"]}
+        workflow_ids = [row["workflow_id"] for row in workflow_rows]
+        if len(workflow_ids) != len(set(workflow_ids)) or set(workflow_ids) != expected_workflows:
+            raise RefinerError("Analysis review must assess every workflow step exactly once")
+        workflow_ok = all(all(row[key] for key in (
+            "order_and_actors_clear", "inputs_outputs_complete", "completion_and_failure_testable",
+            "requirement_traceable")) for row in workflow_rows)
+        risk_rows = review["risk_assessments"]
+        expected_risks = set(RISK_DIMENSIONS)
+        risk_ids = [row["dimension"] for row in risk_rows]
+        if len(risk_ids) != len(set(risk_ids)) or set(risk_ids) != expected_risks:
+            raise RefinerError("Analysis review must assess every risk dimension exactly once")
+        risk_ok = all(row["applicability_justified"] and row["scenario_links_complete"] for row in risk_rows)
+        decision_ok = review["dependencies_assessed"] and review["blocking_decisions_actionable"]
+        if review["approved"] and not (workflow_ok and risk_ok and decision_ok):
+            raise RefinerError("Analysis approval contradicts workflow, risk, dependency or decision assessment")
+        if review["approved"] and analysis["blocking_questions"]:
+            raise RefinerError("Analysis with unresolved blocking decisions cannot be approved")
 
 
 def analysis_markdown(analysis):
-    lines = ["# Business analysis", "", analysis["goal"], "", "## Requirements", ""]
+    lines = ["# Business analysis", "", analysis["goal"]]
+    if analysis.get("schema_version") == "skill-refiner.analysis/v2":
+        context, scope = analysis["context"], analysis["scope"]
+        actor_map = {row["id"]: row for row in analysis["actors"]}
+        lines += ["", "## User and operating context", "",
+                  f"- User intent: {context['user_intent']}", f"- Usage context: {context['usage_context']}",
+                  "- Primary users: " + ", ".join(context["primary_user_ids"]), "", "## Scope and constraints", "",
+                  "- In scope: " + "; ".join(scope["in_scope"]),
+                  "- Out of scope: " + "; ".join(scope["out_of_scope"]),
+                  "- Constraints: " + ("; ".join(scope["constraints"]) or "None stated"), "", "## Actors", ""]
+        for actor in analysis["actors"]:
+            lines.append(f"- {actor['id']} — {actor['role']}: needs={'; '.join(actor['needs'])}; "
+                         f"permission boundary={actor['permission_boundary']}")
+    lines += ["", "## Requirements", ""]
     for req in analysis["requirements"]:
         lines.append(f"- {req['id']}: {req['behavior']} (source: {req['source']}; required={req['required']})")
         lines.extend(f"  - {criterion['id']}: {criterion['statement']} Evidence: {criterion['evidence']}"
                      for criterion in req["acceptance_criteria"])
     lines += ["", "## Workflow", ""]
     for step in analysis["workflow"]:
-        lines += [f"- {step['id']}: {step['action']}", f"  Input: {step['inputs']}; output: {step['outputs']}",
+        lines += [f"- {step.get('order', '')}: {step['id']}: {step['action']}",
+                  f"  Input: {step['inputs']}; output: {step['outputs']}",
                   f"  Completion check: {step['completion_check']}",
                   f"  Failure: {step['failure_behavior']}; requirements: {', '.join(step['requirement_ids'])}"]
+        if "actor_ids" in step:
+            lines.append(f"  Actors: {', '.join(step['actor_ids'])}; preconditions: {'; '.join(step['preconditions'])}; "
+                         f"dependencies: {', '.join(step['dependency_ids']) or 'none'}")
     lines += ["", "## Detailed scenario matrix", ""]
     for scenario in analysis["scenarios"]:
         detail = scenario["detail"]
@@ -237,7 +456,17 @@ def analysis_markdown(analysis):
             lines.append(f"  Excluded because: {scenario['exclusion_reason']}")
     for title, key in [("Assumptions", "assumptions"), ("External dependencies", "external_dependencies"),
                        ("Blocking questions", "blocking_questions")]:
-        lines += ["", "## " + title, ""] + ["- " + x for x in analysis[key]]
+        lines += ["", "## " + title, ""]
+        for item in analysis[key]:
+            if isinstance(item, str):
+                lines.append("- " + item)
+            else:
+                lines.append("- " + json.dumps(item, ensure_ascii=False))
+    if analysis.get("schema_version") == "skill-refiner.analysis/v2":
+        lines += ["", "## Risk assessment", ""]
+        lines.extend(f"- {row['dimension']}: {'applicable' if row['applicable'] else 'not applicable'}; "
+                     f"basis: {row['basis']}; scenarios: {', '.join(row['scenario_ids']) or 'none'}"
+                     for row in analysis["risk_assessments"])
     return "\n".join(lines) + "\n"
 
 
@@ -492,7 +721,8 @@ def run(args):
         feedback = []
         for attempt in range(0 if resume or resume_analysis_complete else 2):
             analysis = agent.ask('analyze',
-                'Analyze the supplied business request into a scoped executable Agent Skill. Choose a concise kebab-case name '
+                'Analyze the supplied business request into a scoped executable Agent Skill. Return schema_version '
+                'skill-refiner.analysis/v2 and satisfy every field in the supplied response_schema. Choose a concise kebab-case name '
                 'unless requested_name is supplied. Extract all business requirements with stable IDs and concrete source '
                 'citations into business_sources. Every requirement.source must begin with its source ID plus a colon '
                 '(for example spec-1: followed by the supporting passage). Include only business requirements from '
@@ -516,7 +746,12 @@ def run(args):
                 'nonmaterial implementation assumptions; missing material business rules belong in blocking_questions. '
                 'Each blocking question must be concise and answerable, state the material choice needed, and avoid '
                 'requesting credentials or asking the user to diagnose an operational failure that can be checked. '
-                'Do not claim an external dependency is verified or replace real services with fabricated success. '
+                'Fill context.user_intent and usage_context; list primary users in actors and context.primary_user_ids. '
+                'Make scope.in_scope, scope.out_of_scope and scope.constraints explicit; if there is no excluded feature, '
+                'say so explicitly in out_of_scope. Give workflow steps contiguous order values, actor_ids, preconditions '
+                'and dependency_ids. Assess every supported risk dimension exactly once with a source-based applicability '
+                'decision, rationale and scenario links. Structure assumptions, external_dependencies and blocking_questions '
+                'according to the schema; use [] only when none exist. Do not claim an external dependency is verified or replace real services with fabricated success. '
                 'Keep dependencies to the user scope. A category is inapplicable only with a concrete scope-based reason; '
                 'normal behavior is always applicable. Do not implement code or provide test answers at this stage.',
                 {**inputs, 'business_sources': business_sources, 'validation_feedback': feedback}, ANALYSIS)
@@ -525,10 +760,13 @@ def run(args):
                 validate_analysis(analysis, args.name, {s['id'] for s in business_sources})
                 if analysis['blocking_questions']:
                     write_json(work / 'analysis.json', analysis)
-                    event('needs_clarification', questions=analysis['blocking_questions'])
+                    event('needs_clarification', questions=[row['question'] for row in analysis['blocking_questions']])
                     return state
                 review = agent.ask('analysis-review',
-                    'Independently review business analysis against the original request and supplied standards. '
+                    'Return schema_version skill-refiner.analysis-review/v2 and independently review every required analysis '
+                    'element against the original request and supplied standards. Fill context_scope_assessment, one '
+                    'workflow_assessment per step, one risk_assessment per supported dimension, dependencies_assessed '
+                    'and blocking_decisions_actionable from evidence. '
                     'Check every requested behavior is retained, requirements are decomposed into atomic acceptance '
                     'criteria with independently observable evidence, and every criterion is grounded; cite the '
                     'specific request or explicit reasonable implementation assumption for every assessment. Assess every '

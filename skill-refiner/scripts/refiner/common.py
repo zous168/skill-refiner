@@ -94,12 +94,21 @@ def snapshot(source, destination):
         shutil.copy2(path, dest)
 
 
-def inventory(root, max_bytes=250_000, priority_paths=()):
+def inventory(root, max_bytes=250_000, priority_paths=(), exclude_paths=(".runtime/venv",)):
     root = Path(root)
     records, used = [], 0
-    priority = {Path(item).as_posix() for item in priority_paths}
-    ordered = sorted(files(root), key=lambda item: (str(item.relative_to(root)) not in priority,
-                                                    str(item.relative_to(root))))
+    priority_order = list(dict.fromkeys(Path(item).as_posix() for item in priority_paths))
+    priority = {item: index for index, item in enumerate(priority_order)}
+    excluded = {Path(item).as_posix().rstrip("/") for item in exclude_paths}
+
+    def is_excluded(path):
+        relative = path.relative_to(root).as_posix()
+        return any(relative == prefix or relative.startswith(prefix + "/") for prefix in excluded)
+
+    ordered = sorted((item for item in files(root) if not is_excluded(item)),
+                     key=lambda item: (str(item.relative_to(root)) not in priority,
+                                       priority.get(str(item.relative_to(root)), 0),
+                                       str(item.relative_to(root))))
     for path in ordered:
         size = path.stat().st_size
         raw = path.read_bytes()

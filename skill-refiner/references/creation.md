@@ -42,6 +42,22 @@ visibility checkpoint, not an approval gate unless a material question remains.
 6. Publish only after all configured executors pass, optionally to a new
    `--destination`. Preserve drafts, rejected attempts, original inputs and results.
 
+Creation and refinement share the same Schema contract and final package gate. Every
+versioned schema path must use `schemas/vN/<logical-name>.schema.json`, where `N` matches
+the declared `version`. A plan with a mismatched version directory or a delivered Skill
+with undeclared/extra schema files cannot pass acceptance or be published.
+
+New Skills use Simplified Chinese for user-facing instructions and human-readable package
+text by default, including `SKILL.md`, references, examples and script messages. Preserve
+machine identifiers, protocol literals, source quotations and the workflow's required
+business-output language. Honor a user-specified language when it differs. Refining an
+existing Skill preserves its established language unless translation is requested.
+
+Created Skills also include the [bounded self-review protocol](self-review-protocol.md):
+freeze requirement-linked checks, cite evidence, permit one targeted correction, and stop
+with a concrete blocker if the check still fails. Creation acceptance verifies both the
+passing path and the missing-evidence/failure path.
+
 `agents.planning` handles analysis and tests, `agents.review` handles business/test/
 standards reviews, `agents.creation` writes the first implementation (falling back
 to `agents.repair`, then `agents.default`), and `agents.repair` fixes observed failures.

@@ -24,18 +24,81 @@ from refiner.checks import validate_plan  # noqa: E402
 from refiner.agent import Agent as RefinerAgent  # noqa: E402
 from refiner.common import (PlanGateError, RefinerError, inventory, manifest, read_json,
                             PlanValidationError, run_process, write_json)  # noqa: E402
-from refiner.creation import (ANALYSIS, ANALYSIS_REVIEW, analysis_markdown, validate_analysis,
-                              validate_analysis_review)  # noqa: E402
+from refiner.creation import (ANALYSIS, ANALYSIS_V1, ANALYSIS_V2, ANALYSIS_REVIEW,
+                              ANALYSIS_REVIEW_V1, ANALYSIS_REVIEW_V2, analysis_markdown,
+                              DRAFT_INSTRUCTION, validate_analysis, validate_analysis_review)  # noqa: E402
 from refiner.plan import (parallel_agent_plan, _source_overview, write_test_scenarios,
                           write_work_plan)  # noqa: E402
-from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate,
+from refiner.pipeline import (LANGUAGE_PLAN_REVIEW, PLAN_REVIEW_CASE_BOOLS, PLANNING,
+                              SELF_REVIEW_PLAN_REVIEW,
+                              close_incomplete_plan_gate,
                               close_incomplete_planning_phases, initial_phase_results, make_plan,
                               make_plan_suites, require_plan_gate, set_phase_result,
                               validate_plan_review)  # noqa: E402
 from refiner.gate import (_verify_phase_history, _verify_plan_control_artifacts,
                           _verify_plan_review_artifacts)  # noqa: E402
 from refiner.runtime import api_request, codex_output_schema, cursor_command, decode_codex_response  # noqa: E402
-from refiner.stages import collect_artifacts  # noqa: E402
+from refiner.stages import StageManifest, collect_artifacts, verify_stage_manifest  # noqa: E402
+from refiner.artifact_validation import (all_schema_refs, schema_ref_compatible,
+                                         schema_refs_compatible, validate_self_review_record,
+                                         validate_skill_schema_package)  # noqa: E402
+from refiner import schemas as refiner_schemas  # noqa: E402
+from refiner.standards import AUTHORING, SELF_REVIEW_STANDARD  # noqa: E402
+
+
+class SelfReviewProtocolTests(unittest.TestCase):
+    def _record(self, *, overall="pass", round_number=0, result="pass"):
+        check = {
+            "check_id": "SR-01", "requirement_ids": ["R1"],
+            "acceptance_criterion_ids": ["R1.A1"], "scenario_ids": ["SC-NORMAL-01"],
+            "result": result, "evidence_refs": ["output/result.json#R1"],
+        }
+        if result in {"fail", "blocked"}:
+            check["gap"] = "The required observable evidence is missing."
+        record = {
+            "schema_version": "agent-skill.self-review-record/v1", "stage_id": "FINAL-VERIFY",
+            "overall_result": overall, "review_round": round_number, "checks": [check],
+            "open_gaps": ([{"check_id": "SR-01", "description": check["gap"]}]
+                          if result in {"fail", "blocked"} else []),
+        }
+        if overall in {"revise_once", "blocked"}:
+            record["next_action"] = "Apply one targeted correction and recheck the frozen controls."
+        return record
+
+    def test_canonical_record_schema_accepts_pass_and_one_bounded_correction(self):
+        validate_self_review_record(self._record())
+        validate_self_review_record(self._record(overall="revise_once", result="fail"))
+        validate_self_review_record(self._record(overall="blocked", round_number=1, result="fail"))
+        with self.assertRaisesRegex(ValueError, "Self-review record fails"):
+            validate_self_review_record(self._record(overall="revise_once", round_number=1, result="fail"))
+
+    def test_record_requires_evidence_and_exact_open_gap_mapping(self):
+        record = self._record()
+        record["checks"][0]["evidence_refs"] = []
+        with self.assertRaisesRegex(ValueError, "Self-review record fails"):
+            validate_self_review_record(record)
+        record = self._record(overall="revise_once", result="fail")
+        record["open_gaps"] = [{"check_id": "UNKNOWN", "description": "The reported gap does not map to a frozen check."}]
+        with self.assertRaisesRegex(ValueError, "open_gaps must identify"):
+            validate_self_review_record(record)
+
+    def test_creation_planning_repair_and_independent_review_share_bounded_protocol(self):
+        for text in (AUTHORING, PLANNING, DRAFT_INSTRUCTION, SELF_REVIEW_STANDARD,
+                     SELF_REVIEW_PLAN_REVIEW):
+            with self.subTest(prompt=text[:40]):
+                self.assertIn("one targeted", text.lower())
+                self.assertIn("blocked", text.lower())
+                self.assertIn("evidence", text.lower())
+
+
+class SkillLanguagePolicyTests(unittest.TestCase):
+    def test_new_skill_generation_defaults_human_readable_content_to_simplified_chinese(self):
+        self.assertIn("Simplified Chinese", DRAFT_INSTRUCTION)
+        self.assertIn("Simplified Chinese", AUTHORING)
+        self.assertIn("Simplified Chinese", PLANNING)
+        self.assertIn("explicit user language requirement", DRAFT_INSTRUCTION)
+        self.assertIn("preserve its", AUTHORING)
+        self.assertIn("Simplified Chinese", LANGUAGE_PLAN_REVIEW)
 
 
 class CodexWireSchemaTests(unittest.TestCase):
@@ -355,6 +418,242 @@ class StageArtifactCollectionTests(unittest.TestCase):
             self.assertEqual(missing, ["original/**"])
 
 
+class StageSchemaContractTests(unittest.TestCase):
+    def _complete_creation_inputs(self, root):
+        stages = StageManifest(root, "create")
+        stages.activate("inputs")
+        (Path(root) / "inputs").mkdir(exist_ok=True)
+        (Path(root) / "inputs.json").write_text('{"requested_name":"demo"}', encoding="utf-8")
+        (Path(root) / "inputs" / "request.md").write_text("The user request.", encoding="utf-8")
+        stages.complete("inputs")
+        return stages
+
+    def test_every_internal_stage_declares_hashed_schema_contracts(self):
+        current = {row["id"]: row for row in all_schema_refs()}
+        for mode in ("refine", "create"):
+            for stage in StageManifest._bound_contract(mode):
+                for field in ("inputs", "outputs"):
+                    for declaration in stage[field]:
+                        reference = declaration["schema_ref"]
+                        self.assertEqual(reference, current[reference["id"]])
+                        self.assertIn("validator_id", reference)
+
+    def test_packaged_domain_schema_files_match_runtime_contracts(self):
+        package_schemas = SCRIPTS.parent / "schemas"
+        expected = {
+            "v2/plan.schema.json": ("skill-refiner.plan-v2", "v2", refiner_schemas.PLAN_V2),
+            "v3/plan.schema.json": ("skill-refiner.plan-v3", "v3", refiner_schemas.PLAN_V3),
+            "v4/plan.schema.json": ("skill-refiner.plan-v4", "v4", refiner_schemas.PLAN_V4),
+            "v5/plan.schema.json": ("skill-refiner.plan-v5", "v5", refiner_schemas.PLAN_V5),
+            "v1/execution-plan.schema.json": ("skill-refiner.execution-plan", "v1", refiner_schemas.EXECUTION_PLAN),
+            "v2/plan-review.schema.json": ("skill-refiner.plan-review-v2", "v2", refiner_schemas.PLAN_REVIEW_V2),
+            "v3/plan-review.schema.json": ("skill-refiner.plan-review-v3", "v3", refiner_schemas.PLAN_REVIEW_V3),
+            "v4/plan-review.schema.json": ("skill-refiner.plan-review-v4", "v4", refiner_schemas.PLAN_REVIEW_V4),
+            "v5/plan-review.schema.json": ("skill-refiner.plan-review-v5", "v5", refiner_schemas.PLAN_REVIEW),
+            "v1/repair.schema.json": ("skill-refiner.repair", "v1", refiner_schemas.REPAIR),
+            "v1/analysis.schema.json": ("skill-refiner.analysis", "v1", ANALYSIS_V1),
+            "v1/analysis-review.schema.json": ("skill-refiner.analysis-review", "v1", ANALYSIS_REVIEW_V1),
+            "v2/analysis.schema.json": ("skill-refiner.analysis-v2", "v2", ANALYSIS_V2),
+            "v2/analysis-review.schema.json": ("skill-refiner.analysis-review-v2", "v2", ANALYSIS_REVIEW_V2),
+            "v1/skill-stage-contracts.schema.json": (
+                "skill-refiner.skill-stage-contracts", "v1",
+                {**refiner_schemas.PLAN["properties"]["stage_contracts"],
+                 "$defs": refiner_schemas.PLAN["$defs"]}),
+        }
+        for filename, (schema_id, version, source_schema) in expected.items():
+            with self.subTest(filename=filename):
+                packaged = read_json(package_schemas / filename)
+                runtime = json.loads(json.dumps(source_schema))
+                runtime.update({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "$id": schema_id, "x-schema-version": version})
+                self.assertEqual(packaged, runtime)
+
+    def test_schema_registry_uses_version_directories_and_reads_legacy_paths(self):
+        refs = all_schema_refs()
+        self.assertTrue(all(row["path"].startswith("schemas/v") for row in refs))
+        current = next(row for row in refs if row["id"] == "skill-refiner.plan-v5")
+        legacy = {**current, "path": "schemas/plan-v5.schema.json"}
+        self.assertTrue(schema_ref_compatible(legacy, current))
+        self.assertTrue(schema_refs_compatible([legacy], [current]))
+        changed = {**legacy, "sha256": "0" * 64}
+        self.assertFalse(schema_ref_compatible(changed, current))
+        self.assertFalse(schema_refs_compatible([changed], [current]))
+
+    def test_resume_migrates_matching_legacy_flat_schema_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            StageManifest(root, "create")
+            saved = read_json(root / "stages.json")
+
+            def legacy_path(reference):
+                filename = Path(reference["path"]).name
+                stem = filename[:-len(".schema.json")]
+                return f"schemas/{stem}-{reference['version']}.schema.json"
+
+            old_paths = {}
+            for reference in saved["schema_refs"]:
+                old_paths[reference["id"]] = legacy_path(reference)
+                reference["path"] = old_paths[reference["id"]]
+            changed_declarations = 0
+            for stage in saved["stages"]:
+                for field in ("inputs", "outputs"):
+                    for declaration in stage[field]:
+                        reference = declaration.get("schema_ref")
+                        if reference and reference["id"] in old_paths:
+                            reference["path"] = old_paths[reference["id"]]
+                            changed_declarations += 1
+            self.assertGreater(changed_declarations, 0)
+            write_json(root / "stages.json", saved)
+
+            resumed = StageManifest(root, "create", resume=True)
+            self.assertEqual(resumed.data["resume_count"], 1)
+            self.assertTrue(all(row["path"].startswith("schemas/v")
+                                for row in resumed.data["schema_refs"]))
+
+    def test_invalid_structured_output_blocks_stage_completion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stages = StageManifest(root, "create")
+            stages.activate("inputs")
+            (root / "inputs").mkdir()
+            (root / "inputs.json").write_text("[]", encoding="utf-8")
+            (root / "inputs" / "request.md").write_text("The user request.", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "json-object"):
+                stages.complete("inputs")
+            self.assertEqual(next(row for row in stages.data["stages"] if row["id"] == "inputs")["status"],
+                             "running")
+            stages.finish("error")
+            saved = read_json(root / "stages.json")
+            self.assertEqual(saved["stages"][0]["status"], "blocked")
+
+    def test_completed_stage_is_reused_and_handoff_inputs_are_validated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._complete_creation_inputs(root)
+            resumed = StageManifest(root, "create", resume=True)
+            self.assertTrue(resumed.is_completed("inputs"))
+            self.assertEqual(resumed.data["resume_count"], 1)
+            resumed.activate("analysis")
+            analysis = next(row for row in resumed.data["stages"] if row["id"] == "analysis")
+            self.assertTrue(analysis["input_artifacts"])
+            self.assertTrue(all(row["validation"]["status"] == "passed"
+                                for row in analysis["input_artifacts"]))
+
+    def test_resume_rejects_changed_completed_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._complete_creation_inputs(root)
+            (root / "inputs.json").write_text('{"requested_name":"changed"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "size or SHA-256 changed"):
+                StageManifest(root, "create", resume=True)
+
+    def test_manifest_schema_registry_hash_mismatch_rejects_resume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._complete_creation_inputs(root)
+            saved = read_json(root / "stages.json")
+            saved["schema_refs"][0]["sha256"] = "0" * 64
+            write_json(root / "stages.json", saved)
+            with self.assertRaisesRegex(ValueError, "schema registry or schema hash changed"):
+                StageManifest(root, "create", resume=True)
+
+    def test_final_stage_verifier_rejects_schema_registry_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            StageManifest(root, "create")
+            saved = read_json(root / "stages.json")
+            saved["schema_refs"][0]["path"] = "schemas/attacker.schema.json"
+            write_json(root / "stages.json", saved)
+            with self.assertRaisesRegex(ValueError, "schema registry or schema hash changed"):
+                verify_stage_manifest(root, mode="create", run_status="running")
+
+    def test_runtime_schemas_and_validators_must_be_shipped_in_target_skill(self):
+        definition = {"id": "S-RESULT", "version": "v1", "path": "schemas/v1/result.schema.json",
+                      "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                      "runtime_needed": True}
+        contract = {"schemas": [definition]}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "schemas/v1").mkdir(parents=True)
+            (root / "scripts").mkdir()
+            (root / definition["path"]).write_text(
+                json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "$id": "S-RESULT", "x-schema-version": "v1", "type": "object"}),
+                encoding="utf-8")
+            (root / definition["validator_path"]).write_text("# packaged validator", encoding="utf-8")
+            validate_skill_schema_package(root, contract)
+            (root / definition["validator_path"]).unlink()
+            with self.assertRaisesRegex(ValueError, "validator_path"):
+                validate_skill_schema_package(root, contract)
+
+    def test_delivered_contract_rejects_multiple_versions_for_one_schema_id(self):
+        first = {"id": "S-RESULT", "version": "v1", "path": "schemas/v1/result.schema.json",
+                 "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                 "runtime_needed": True}
+        second = {**first, "version": "v2", "path": "schemas/v2/result.schema.json"}
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "one active version per logical schema ID"):
+                validate_skill_schema_package(Path(temp), {"schemas": [first, second]})
+
+    def test_delivered_skill_omits_schemas_marked_not_runtime_needed(self):
+        definition = {"id": "S-PLAN", "version": "v1", "path": "schemas/v1/plan.schema.json",
+                      "validator_id": "jsonschema", "validator_path": "scripts/validate-plan.py",
+                      "runtime_needed": False}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "schemas/v1").mkdir(parents=True)
+            (root / "schemas/v1/plan.schema.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not runtime-needed"):
+                validate_skill_schema_package(root, {"schemas": [definition]})
+
+    def test_delivered_schema_directory_must_match_declared_version(self):
+        definition = {"id": "S-RESULT", "version": "v1", "path": "schemas/v2/result.schema.json",
+                      "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                      "runtime_needed": True}
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "version directory must match"):
+                validate_skill_schema_package(Path(temp), {"schemas": [definition]})
+
+    def test_delivered_skill_rejects_unlisted_historical_schema_files(self):
+        definition = {"id": "S-RESULT", "version": "v1", "path": "schemas/v1/result.schema.json",
+                      "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                      "runtime_needed": True}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "SKILL.md").write_text("---\nname: sample-skill\n---\n", encoding="utf-8")
+            (root / "schemas/v1").mkdir(parents=True)
+            (root / "scripts").mkdir()
+            schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "S-RESULT",
+                      "x-schema-version": "v1", "type": "object"}
+            (root / definition["path"]).write_text(json.dumps(schema), encoding="utf-8")
+            (root / "schemas/v0").mkdir()
+            (root / "schemas/v0/result.schema.json").write_text(
+                json.dumps({**schema, "$id": "S-RESULT-OLD", "x-schema-version": "v0"}), encoding="utf-8")
+            (root / definition["validator_path"]).write_text("# packaged validator", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "undeclared or historical schema file"):
+                validate_skill_schema_package(root, {"schemas": [definition]})
+
+    def test_refiner_keeps_private_schema_compatibility_registry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            root.mkdir(exist_ok=True)
+            (root / "SKILL.md").write_text("---\nname: skill-refiner\n---\n", encoding="utf-8")
+            (root / "schemas/v1").mkdir(parents=True)
+            (root / "schemas/v2").mkdir()
+            (root / "schemas/v1/legacy.schema.json").write_text("{}", encoding="utf-8")
+            (root / "schemas/v2/current.schema.json").write_text(
+                json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema",
+                            "$id": "S-CURRENT", "x-schema-version": "v2", "type": "object"}),
+                encoding="utf-8")
+            (root / "scripts").mkdir()
+            validator = root / "scripts/validate.py"
+            validator.write_text("# packaged validator", encoding="utf-8")
+            definition = {"id": "S-CURRENT", "version": "v2", "path": "schemas/v2/current.schema.json",
+                          "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                          "runtime_needed": True}
+            validate_skill_schema_package(root, {"schemas": [definition]})
+
+
 class BackupInventoryTests(unittest.TestCase):
     def test_before_backup_files_are_excluded_from_manifest_inventory_and_overview(self):
         with tempfile.TemporaryDirectory() as root:
@@ -370,6 +669,42 @@ class BackupInventoryTests(unittest.TestCase):
             _, overview = _source_overview(root)
             self.assertEqual([item for kind, item in overview if kind == "file"],
                              ["scripts/refiner/agent.py"])
+
+    def test_agent_inventory_omits_installed_venv_but_keeps_skill_and_runtime_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            files = {
+                "SKILL.md": "Skill instructions",
+                ".runtime/backends.json": "{}",
+                ".runtime/venv/Lib/site-packages/example.py": "third-party package source",
+                "references/local-runtime.json": "{\"max_rounds\": 2}",
+            }
+            for relative, content in files.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            observed = {Path(item["path"]).as_posix(): item for item in inventory(root)}
+
+        self.assertEqual(set(observed), {
+            "SKILL.md", ".runtime/backends.json", "references/local-runtime.json"})
+        self.assertEqual(observed["SKILL.md"]["content"], "Skill instructions")
+        self.assertEqual(observed["references/local-runtime.json"]["content"],
+                         "{\"max_rounds\": 2}")
+
+    def test_priority_paths_control_context_order_under_byte_budget(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            for name, content in (("alpha.txt", "a" * 50), ("beta.txt", "b" * 50),
+                                  ("gamma.txt", "g" * 50)):
+                (root / name).write_text(content, encoding="utf-8")
+
+            observed = inventory(root, max_bytes=100, priority_paths=("gamma.txt", "alpha.txt"))
+
+        self.assertEqual([item["path"] for item in observed], ["gamma.txt", "alpha.txt", "beta.txt"])
+        self.assertEqual(observed[0]["content"], "g" * 50)
+        self.assertEqual(observed[1]["content"], "a" * 50)
+        self.assertEqual(observed[2]["omitted"], "context limit; unresolved dependency if required")
 
 
 def _case(case_id, kind, scenario, expected_outcome, prompt, requirement_id="R1"):
@@ -432,11 +767,86 @@ def _minimal_plan(**case_overrides):
         elif key in boundary:
             boundary[key] = value
     return {
-        "schema_version": "skill-refiner.plan/v3",
+        "schema_version": "skill-refiner.plan/v5",
         "requirements": requirements,
         "cases": [normal, boundary],
         "coverage_gaps": [],
         "assumptions": [],
+        "stage_contracts": {
+            "schema_version": "skill-refiner.skill-stage-contracts/v1",
+            "schemas": [{"id": "S-RESULT", "version": "v1", "path": "schemas/v1/result.schema.json",
+                         "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+                         "runtime_needed": True,
+                         "media_type": "application/json"}],
+            "stages": [{
+                "id": "result", "goal": "Produce the documented result artifact.", "requirement_ids": ["R1"],
+                "inputs": [],
+                "outputs": [{"path": "reports/result.json", "media_type": "application/json",
+                             "schema_id": "S-RESULT", "schema_version": "v1", "required": True}],
+                "validation_gate": "Validate the result against its packaged JSON Schema before handoff.",
+                "validation_points": ["after_generation", "before_handoff", "on_resume", "final_verification"],
+                "failure_states": ["schema_invalid", "validation_error"],
+                "completion_check": "The output validates and its content hash is recorded.",
+                "resume_policy": "reuse_if_contract_hashes_match",
+            }],
+        },
+        "execution_plan": {
+            "schema_version": "skill-refiner.execution-plan/v1",
+            "objective": "Implement and verify the requested Skill behavior.",
+            "scope": {"in_scope": ["Implement the mapped behavior."],
+                      "out_of_scope": ["Unrequested integrations."], "constraints": []},
+            "max_parallel_agents": 1,
+            "steps": [
+                {"id": "STEP-PLAN", "order": 1, "title": "Freeze the test plan",
+                 "goal": "Freeze traceable cases before changing the Skill.",
+                 "actions": ["Map the requirement and both cases to observable assertions."],
+                 "inputs": ["The request and requirements.md#R1."],
+                 "outputs": [{"path": "plans/test-plan.json", "schema_id": "S-RESULT",
+                              "schema_version": "v1", "evidence": "The reviewed plan file and control summary."}],
+                 "requirement_ids": ["R1"], "case_ids": ["dev-normal", "dev-boundary"],
+                 "depends_on": [], "execution_mode": "serial", "parallel_wave": None,
+                 "serial_reason": "Planning must freeze the requirements before implementation.",
+                 "agent": {"role": "primary planner", "scope": "Freeze the complete requirement and case map.",
+                           "write_scope": ["plans/"], "merge_owner": "primary agent",
+                           "join_gate": "All requirements and cases have stable IDs and schema-valid fields."},
+                 "exit_criteria": [{"id": "STEP-PLAN-OK", "condition": "Both cases map to the required behavior.",
+                                    "evidence": "The plan JSON and successful full control results."}],
+                 "failure_policy": {"action": "stop", "max_attempts": 0,
+                                    "terminal_state": "blocked", "recovery_policy": "blocked"}},
+                {"id": "STEP-IMPLEMENT", "order": 2, "title": "Implement the Skill",
+                 "goal": "Implement the requested behavior without changing the frozen plan.",
+                 "actions": ["Make the smallest implementation changes supported by the requirements."],
+                 "inputs": ["The frozen plan and current Skill snapshot."],
+                 "outputs": [{"path": "implementation/changes.json", "schema_id": "S-RESULT",
+                              "schema_version": "v1", "evidence": "Changed files and requirement-linked rationale."}],
+                 "requirement_ids": ["R1"], "case_ids": ["dev-normal", "dev-boundary"],
+                 "depends_on": ["STEP-PLAN"], "execution_mode": "serial", "parallel_wave": None,
+                 "serial_reason": "Implementation depends on the frozen requirements and test oracles.",
+                 "agent": {"role": "primary implementer", "scope": "Edit the target Skill files only.",
+                           "write_scope": ["implementation/"], "merge_owner": "primary agent",
+                           "join_gate": "Changed files cite frozen requirements and preserve protected oracles."},
+                 "exit_criteria": [{"id": "STEP-IMPLEMENT-OK", "condition": "Each required behavior has an implementation path.",
+                                    "evidence": "The candidate Skill tree and static validation output."}],
+                 "failure_policy": {"action": "stop", "max_attempts": 0,
+                                    "terminal_state": "blocked", "recovery_policy": "blocked"}},
+                {"id": "STEP-VERIFY", "order": 3, "title": "Verify and deliver",
+                 "goal": "Run controls and independent acceptance against the final candidate.",
+                 "actions": ["Run the frozen regression and acceptance cases, then verify delivered files."],
+                 "inputs": ["The candidate Skill and frozen development and acceptance plans."],
+                 "outputs": [{"path": "evidence/final.json", "schema_id": "S-RESULT",
+                              "schema_version": "v1", "evidence": "Machine results and candidate hashes."}],
+                 "requirement_ids": ["R1"], "case_ids": ["dev-normal", "dev-boundary"],
+                 "depends_on": ["STEP-IMPLEMENT"], "execution_mode": "serial", "parallel_wave": None,
+                 "serial_reason": "Final verification can only begin after the candidate and controls exist.",
+                 "agent": {"role": "primary verifier", "scope": "Execute and reconcile all frozen controls.",
+                           "write_scope": ["evidence/"], "merge_owner": "primary agent",
+                           "join_gate": "All required cases pass and the delivered manifest matches evidence."},
+                 "exit_criteria": [{"id": "STEP-VERIFY-OK", "condition": "Every required case and final hash check passes.",
+                                    "evidence": "Acceptance summary and final evidence manifest."}],
+                 "failure_policy": {"action": "stop", "max_attempts": 0,
+                                    "terminal_state": "blocked", "recovery_policy": "blocked"}},
+            ],
+        },
     }
 
 
@@ -469,10 +879,116 @@ def _approved_review(plan):
         "approved": True,
         "issues": [],
         "case_contracts": [_contract_entry(case["id"]) for case in plan["cases"]],
+        "stage_contracts_assessed": True,
+        "stage_contracts_complete": True,
+        "schema_paths_safe": True,
+        "validator_lifecycle_covered": True,
+        "execution_plan_assessed": True,
+        "execution_plan_complete": True,
+        "dependency_graph_valid": True,
+        "concurrency_safe": True,
+        "failure_recovery_bounded": True,
+        "step_assessments": [{"step_id": step["id"], "goal_actions_clear": True,
+                              "inputs_outputs_evidenced": True, "requirement_case_traceable": True,
+                              "dependencies_valid": True, "agent_scope_safe": True,
+                              "exit_and_recovery_clear": True,
+                              "basis": "The step has grounded goals, evidence, safe scope and bounded recovery."}
+                             for step in plan["execution_plan"]["steps"]],
     }
 
 
 class PlanCaseFieldValidationTests(unittest.TestCase):
+    def test_plan_requires_versioned_skill_stage_artifact_contracts(self):
+        plan = _minimal_plan()
+        del plan["stage_contracts"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(jsonschema.ValidationError):
+                validate_plan(plan, root)
+
+    def test_plan_v5_requires_the_schema_constrained_execution_plan(self):
+        plan = _minimal_plan()
+        del plan["execution_plan"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(jsonschema.ValidationError):
+                validate_plan(plan, root)
+
+    def test_execution_plan_case_links_must_resolve_and_cover_the_matrix(self):
+        plan = _minimal_plan()
+        plan["execution_plan"]["steps"][0]["case_ids"] = ["unknown-case"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "unknown test case"):
+                validate_plan(plan, root)
+        plan = _minimal_plan()
+        for step in plan["execution_plan"]["steps"]:
+            step["case_ids"] = ["dev-normal"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "omits requirements or cases"):
+                validate_plan(plan, root)
+
+    def test_execution_plan_rejects_forward_or_cyclic_dependencies(self):
+        plan = _minimal_plan()
+        plan["execution_plan"]["steps"][0]["depends_on"] = ["STEP-VERIFY"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "cyclic or out of order"):
+                validate_plan(plan, root)
+
+    def test_parallel_execution_wave_rejects_overlapping_write_scopes(self):
+        plan = _minimal_plan()
+        work = plan["execution_plan"]
+        work["max_parallel_agents"] = 2
+        first, second = work["steps"][:2]
+        for step in (first, second):
+            step["execution_mode"] = "parallel"
+            step["parallel_wave"] = "WAVE-1"
+            step["serial_reason"] = ""
+        second["depends_on"] = []
+        first["agent"]["write_scope"] = ["shared/output/"]
+        second["agent"]["write_scope"] = ["shared/output/step-two/"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "overlapping write scopes"):
+                validate_plan(plan, root)
+
+    def test_acceptance_must_preserve_frozen_execution_plan(self):
+        plan = _minimal_plan()
+        expected = json.loads(json.dumps(plan["execution_plan"]))
+        expected["steps"][0]["goal"] = "A different plan must not replace the frozen work."
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "changed the frozen"):
+                validate_plan(plan, root, expected_execution_plan=expected)
+
+    def test_stage_outputs_must_reference_a_declared_schema(self):
+        plan = _minimal_plan()
+        plan["stage_contracts"]["stages"][0]["outputs"][0]["schema_id"] = "UNKNOWN"
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "undeclared schema"):
+                validate_plan(plan, root)
+
+    def test_stage_contract_allows_only_one_active_version_per_schema_id(self):
+        plan = _minimal_plan()
+        plan["stage_contracts"]["schemas"].append({
+            "id": "S-RESULT", "version": "v2", "path": "schemas/v2/result.schema.json",
+            "validator_id": "jsonschema", "validator_path": "scripts/validate.py",
+            "runtime_needed": True, "media_type": "application/json",
+        })
+        plan["execution_plan"]["steps"][0]["outputs"][0]["schema_version"] = "v2"
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "one active version per logical schema ID"):
+                validate_plan(plan, root)
+
+    def test_stage_schema_path_must_stay_inside_the_skill_package(self):
+        plan = _minimal_plan()
+        plan["stage_contracts"]["schemas"][0]["path"] = "schemas/v1/../outside.schema.json"
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "schema path is unsafe"):
+                validate_plan(plan, root)
+
+    def test_stage_schema_version_directory_must_match_declared_version(self):
+        plan = _minimal_plan()
+        plan["stage_contracts"]["schemas"][0]["path"] = "schemas/v2/result.schema.json"
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(RefinerError, "version directory must match"):
+                validate_plan(plan, root)
+
     def test_missing_required_case_text_rejected(self):
         for field in ("scenario", "expected_outcome"):
             with self.subTest(field=field):
@@ -644,6 +1160,12 @@ class PlanReviewValidationTests(unittest.TestCase):
             validate_plan_review(review, self.plan)
         self.assertIn("every case exactly once", str(ctx.exception))
 
+    def test_stage_schema_review_flags_are_mandatory_and_true(self):
+        review = _approved_review(self.plan)
+        review["validator_lifecycle_covered"] = False
+        with self.assertRaisesRegex(RefinerError, "stage schema contracts"):
+            validate_plan_review(review, self.plan)
+
     def test_missing_review_assessment_rejected(self):
         review = _approved_review(self.plan)
         del review["case_contracts"][0]["scenario_consistent"]
@@ -742,6 +1264,8 @@ class PlanRevisionAndPhaseGateTests(unittest.TestCase):
         replacement = _case("dev-added", "boundary", "Operator uses an added case.",
                             "The added case produces evidence.", "Run the added boundary prompt.")
         revised = {**first, "cases": [first["cases"][0], replacement]}
+        for step in revised["execution_plan"]["steps"]:
+            step["case_ids"] = ["dev-normal", "dev-added"]
 
         class Agent:
             def __init__(self):
@@ -802,6 +1326,8 @@ class PlanRevisionAndPhaseGateTests(unittest.TestCase):
         for suite in plans:
             plans[suite]["cases"][0]["id"] = f"{suite}-normal"
             plans[suite]["cases"][1]["id"] = f"{suite}-boundary"
+            for step in plans[suite]["execution_plan"]["steps"]:
+                step["case_ids"] = [f"{suite}-normal", f"{suite}-boundary"]
         with tempfile.TemporaryDirectory() as root:
             for suite, plan in plans.items():
                 class Agent:
@@ -881,6 +1407,14 @@ class PlanMarkdownRenderingTests(unittest.TestCase):
         self.assertIn("acceptance-spec.md#A1", scenarios)
         self.assertIn("contains; expected=token-acc-normal", scenarios)
         self.assertIn("Oracle rationale:", work_plan)
+        self.assertIn("## Skill phase and artifact contracts", work_plan)
+        self.assertIn("S-RESULT@v1", work_plan)
+        self.assertIn("## Schema-validated work breakdown", work_plan)
+        self.assertIn("STEP-PLAN — Freeze the test plan", work_plan)
+        self.assertIn("Outputs/evidence:", work_plan)
+        self.assertIn("Concurrency limit: 1 Agent(s)", work_plan)
+        self.assertIn("recovery: blocked", work_plan)
+        self.assertIn("after generation", work_plan.lower())
         self.assertEqual(work_plan.count("- Conclusion required to advance:"), 8)
         self.assertIn("Step 1 — Inspect the request and map the existing Skill", work_plan)
         self.assertIn("Step 4 — Pass the plan gate before target evaluation", work_plan)
@@ -917,17 +1451,30 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
 
     def _analysis(self):
         return {
+            "schema_version": "skill-refiner.analysis/v2",
             "name": "demo-skill",
             "goal": "Complete the requested business workflow.",
+            "context": {"user_intent": "Help the user complete the specified business workflow.",
+                        "usage_context": "The Skill is invoked by a user with a concrete business request.",
+                        "primary_user_ids": ["ACTOR-USER"]},
+            "scope": {"in_scope": ["Complete the requested business workflow."],
+                      "out_of_scope": ["No additional integrations or side effects beyond the request."],
+                      "constraints": ["Use only facts supplied by the user or inspected sources."]},
+            "actors": [{"id": "ACTOR-USER", "role": "Skill user",
+                        "needs": ["Receive the requested result."],
+                        "permission_boundary": "Only perform actions explicitly authorized by the user."}],
             "requirements": [
                 {"id": "R1", "behavior": "Return a useful result.", "source": "spec-1: requested result", "required": True,
                  "acceptance_criteria": [{"id": "R1.A1", "statement": "Return the requested result fields.",
                                            "evidence": "Each requested field appears in the response."}]},
             ],
             "workflow": [
-                {"id": "W1", "action": "Process the request.", "inputs": "Request text.",
+                {"id": "W1", "order": 1, "action": "Process the request.",
+                 "actor_ids": ["ACTOR-USER"], "preconditions": ["A request is supplied."],
+                 "inputs": "Request text.",
                  "outputs": "A result.", "completion_check": "The result contains the requested fields.",
-                 "failure_behavior": "Report the missing field and stop.", "requirement_ids": ["R1"]},
+                 "failure_behavior": "Report the missing field and stop.", "requirement_ids": ["R1"],
+                 "dependency_ids": []},
             ],
             "scenarios": [
                 self._scenario("SC-NORMAL-01", "normal", True, "Valid request with all required fields.",
@@ -941,6 +1488,13 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
                                "Make the declared dependency unavailable before submission.",
                                exclusion_reason="The requested Skill has no external dependency."),
             ],
+            "risk_assessments": [
+                {"dimension": dimension, "applicable": dimension == "input_variation",
+                 "basis": "This risk was checked against the supplied scope and scenario matrix.",
+                 "scenario_ids": (["SC-NORMAL-01", "SC-NORMAL-02"]
+                                  if dimension == "input_variation" else [])}
+                for dimension in refiner_schemas.RISK_DIMENSIONS
+            ],
             "assumptions": [], "external_dependencies": [], "blocking_questions": [],
         }
 
@@ -953,6 +1507,75 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
         del analysis["workflow"][0]["completion_check"]
         with self.assertRaises(jsonschema.ValidationError):
             validate_analysis(analysis)
+
+    def test_v2_analysis_requires_explicit_context_scope_actors_and_full_risk_register(self):
+        for field in ("context", "scope", "actors", "risk_assessments"):
+            with self.subTest(field=field):
+                analysis = self._analysis()
+                del analysis[field]
+                with self.assertRaises(jsonschema.ValidationError):
+                    validate_analysis(analysis)
+
+    def test_analysis_cross_references_actor_and_every_applicable_risk_scenario(self):
+        analysis = self._analysis()
+        analysis["workflow"][0]["actor_ids"] = ["UNKNOWN-ACTOR"]
+        with self.assertRaisesRegex(RefinerError, "unknown actor"):
+            validate_analysis(analysis)
+        analysis = self._analysis()
+        risk = next(row for row in analysis["risk_assessments"] if row["dimension"] == "input_variation")
+        risk["scenario_ids"] = ["SC-NORMAL-01"]
+        with self.assertRaisesRegex(RefinerError, "link every applicable matching scenario"):
+            validate_analysis(analysis)
+
+    def test_v2_review_assesses_every_workflow_and_risk_row(self):
+        analysis = self._analysis()
+        analysis["workflow"].append({**analysis["workflow"][0], "id": "W2", "order": 2})
+        review = {
+            "schema_version": "skill-refiner.analysis-review/v2", "approved": True, "issues": [],
+            "requirement_assessments": [{"requirement_id": "R1", "grounded": True,
+                                         "acceptance_criteria_atomic": True, "criteria_observable": True,
+                                         "basis": "The source and criterion are traceable and observable."}],
+            "scenario_assessments": [{"scenario_id": row["id"], "detail_executable": True,
+                                      "risk_coverage_complete": True, "traceability_complete": True,
+                                      "basis": "The actions and outcomes can be executed and observed."}
+                                     for row in analysis["scenarios"]],
+            "context_scope_assessment": {"intent_grounded": True, "actors_complete": True,
+                "scope_clear": True, "constraints_complete": True,
+                "basis": "User, scope and boundaries are all grounded in the request."},
+            "workflow_assessments": [{"workflow_id": row["id"], "order_and_actors_clear": True,
+                "inputs_outputs_complete": True, "completion_and_failure_testable": True,
+                "requirement_traceable": True, "basis": "This step has ordered actions and observable completion."}
+                for row in analysis["workflow"]],
+            "risk_assessments": [{"dimension": row["dimension"], "applicability_justified": True,
+                "scenario_links_complete": True,
+                "basis": "The dimension's applicability and scenario links were checked."}
+                for row in analysis["risk_assessments"]],
+            "dependencies_assessed": True, "blocking_decisions_actionable": True,
+        }
+        validate_analysis_review(review, analysis)
+        review["workflow_assessments"].pop()
+        with self.assertRaisesRegex(RefinerError, "every workflow step"):
+            validate_analysis_review(review, analysis)
+
+    def test_legacy_v1_analysis_and_review_remain_readable_for_existing_runs(self):
+        analysis = self._analysis()
+        for field in ("schema_version", "context", "scope", "actors", "risk_assessments"):
+            analysis.pop(field)
+        for step in analysis["workflow"]:
+            for field in ("order", "actor_ids", "preconditions", "dependency_ids"):
+                step.pop(field)
+        validate_analysis(analysis)
+        review = {
+            "approved": True, "issues": [],
+            "requirement_assessments": [{"requirement_id": "R1", "grounded": True,
+                                         "acceptance_criteria_atomic": True, "criteria_observable": True,
+                                         "basis": "Legacy source and acceptance criterion remain traceable."}],
+            "scenario_assessments": [{"scenario_id": row["id"], "detail_executable": True,
+                                      "risk_coverage_complete": True, "traceability_complete": True,
+                                      "basis": "The legacy scenario remains complete."}
+                                     for row in analysis["scenarios"]],
+        }
+        validate_analysis_review(review, analysis)
 
     def test_every_required_atomic_criterion_must_appear_in_an_applicable_scenario(self):
         analysis = self._analysis()
@@ -971,6 +1594,7 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
     def test_independent_analysis_review_must_assess_every_scenario_and_criterion(self):
         analysis = self._analysis()
         review = {
+            "schema_version": "skill-refiner.analysis-review/v2",
             "approved": True, "issues": [],
             "requirement_assessments": [{"requirement_id": "R1", "grounded": True,
                                          "acceptance_criteria_atomic": True, "criteria_observable": True,
@@ -979,6 +1603,19 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
                                       "risk_coverage_complete": True, "traceability_complete": True,
                                       "basis": "Inputs, actions and outcomes are concrete."}
                                      for row in analysis["scenarios"]],
+            "context_scope_assessment": {"intent_grounded": True, "actors_complete": True,
+                                         "scope_clear": True, "constraints_complete": True,
+                                         "basis": "The request and all material boundaries are explicitly represented."},
+            "workflow_assessments": [{"workflow_id": row["id"], "order_and_actors_clear": True,
+                                      "inputs_outputs_complete": True, "completion_and_failure_testable": True,
+                                      "requirement_traceable": True,
+                                      "basis": "The ordered action has observed inputs, outputs, completion and failure."}
+                                     for row in analysis["workflow"]],
+            "risk_assessments": [{"dimension": row["dimension"], "applicability_justified": True,
+                                  "scenario_links_complete": True,
+                                  "basis": "Applicability and scenario links match the source and matrix."}
+                                 for row in analysis["risk_assessments"]],
+            "dependencies_assessed": True, "blocking_decisions_actionable": True,
         }
         validate_analysis_review(review, analysis)
         review["scenario_assessments"].pop()

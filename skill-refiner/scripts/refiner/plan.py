@@ -317,13 +317,35 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
         acceptance = read_json(work / "refinement" / "acceptance-plan.json")
     lines = ["# Skill design and test plan", ""]
     if analysis:
-        lines += ["## Goal", "", analysis.get("goal", "Not recorded."), "", "## Proposed workflow", ""]
+        lines += ["## Goal", "", analysis.get("goal", "Not recorded.")]
+        if analysis.get("context"):
+            context = analysis["context"]
+            lines += ["", "## User and operating context", "",
+                      f"- Intent: {_md(context['user_intent'])}",
+                      f"- Usage: {_md(context['usage_context'])}",
+                      f"- Primary users: {', '.join(context['primary_user_ids'])}"]
+        if analysis.get("scope"):
+            scope = analysis["scope"]
+            lines += ["", "## Scope and constraints", "",
+                      "- In scope: " + "; ".join(_md(x) for x in scope["in_scope"]),
+                      "- Out of scope: " + "; ".join(_md(x) for x in scope["out_of_scope"]),
+                      "- Constraints: " + ("; ".join(_md(x) for x in scope["constraints"]) or "None stated")]
+        if analysis.get("actors"):
+            lines += ["", "## Actors and boundaries", ""]
+            lines.extend(f"- **{_md(row['id'])} — {_md(row['role'])}:** needs: "
+                         f"{_md('; '.join(row['needs']))}; permission boundary: {_md(row['permission_boundary'])}"
+                         for row in analysis["actors"])
+        lines += ["", "## Proposed workflow", ""]
         for step in analysis.get("workflow", []):
-            lines += [f"- **{_md(step['id'])}:** {_md(step['action'])}",
+            lines += [f"- **{step.get('order', '')} {_md(step['id'])}:** {_md(step['action'])}",
                       f"  - Input: {_md(step['inputs'])}; output: {_md(step['outputs'])}",
                       f"  - Completion check: {_md(step['completion_check'])}",
                       f"  - Failure handling: {_md(step['failure_behavior'])}",
                       f"  - Requirements: {', '.join(step['requirement_ids'])}"]
+            if "actor_ids" in step:
+                lines.append(f"  - Actors: {', '.join(step['actor_ids'])}; preconditions: "
+                             f"{_md('; '.join(step['preconditions']))}; dependencies: "
+                             f"{', '.join(step['dependency_ids']) or 'none'}")
         _, outline = _source_overview(source)
         if outline:
             lines += ["", "## Implementation structure", ""]
@@ -363,10 +385,84 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
                       f"  - Risk dimensions: {_md(', '.join(detail['risk_dimensions']))}; basis: {_md(item['basis'])}"]
             if not item["applicable"]:
                 lines.append(f"  - Exclusion reason: {_md(item['exclusion_reason'])}")
+    stage_contracts = (plan or {}).get("stage_contracts", {})
+    if stage_contracts:
+        schemas = {(row["id"], row["version"]): row for row in stage_contracts.get("schemas", [])}
+        lines += ["", "## Skill phase and artifact contracts", "",
+                  "Each phase binds its inputs and outputs to a packaged schema and validator. Validation runs "
+                  "after generation, before handoff, on resume, and during final verification.", ""]
+        for index, stage in enumerate(stage_contracts.get("stages", []), 1):
+            lines += [f"### {index}. {_md(stage['id'])}", "",
+                      f"- Goal: {_md(stage['goal'])}",
+                      f"- Requirements: {', '.join(stage['requirement_ids'])}",
+                      f"- Completion check: {_md(stage['completion_check'])}",
+                      f"- Validation gate: {_md(stage['validation_gate'])}",
+                      f"- Failure states: {', '.join(stage['failure_states'])}",
+                      f"- Resume policy: `{stage['resume_policy']}`"]
+            for label in ("inputs", "outputs"):
+                lines.append(f"- {label.title()}:")
+                if not stage[label]:
+                    lines.append("  - none")
+                for artifact in stage[label]:
+                    schema = schemas[(artifact["schema_id"], artifact["schema_version"])]
+                    lines.append(f"  - `{artifact['path']}` ({artifact['media_type']}) → "
+                                 f"`{schema['id']}@{schema['version']}` at `{schema['path']}`; "
+                                 f"validator `{schema['validator_id']}`; "
+                                 f"runtime needed: {'yes' if schema['runtime_needed'] else 'no'}")
+            lines.append("")
+        lines += ["### Packaged schemas", ""]
+        lines.extend(f"- `{row['id']}@{row['version']}`: `{row['path']}`; "
+                     f"validator `{row['validator_id']}`; runtime needed: "
+                     f"{'yes' if row['runtime_needed'] else 'no'}"
+                     for row in stage_contracts.get("schemas", []))
+    execution_plan = (plan or {}).get("execution_plan")
+    if execution_plan:
+        lines += ["", "## Schema-validated work breakdown", "",
+                  f"- Objective: {_md(execution_plan['objective'])}",
+                  f"- Concurrency limit: {execution_plan['max_parallel_agents']} Agent(s)",
+                  "- Scope: " + "; ".join(_md(x) for x in execution_plan["scope"]["in_scope"]),
+                  "- Excluded: " + "; ".join(_md(x) for x in execution_plan["scope"]["out_of_scope"]), ""]
+        schema_map = {(row["id"], row["version"]): row for row in stage_contracts.get("schemas", [])}
+        for step in sorted(execution_plan["steps"], key=lambda row: row["order"]):
+            deps = ", ".join(step["depends_on"]) or "none"
+            schedule = (f"parallel wave `{step['parallel_wave']}`" if step["execution_mode"] == "parallel"
+                        else f"serial: {_md(step['serial_reason'])}")
+            lines += [f"### {step['order']}. {_md(step['id'])} — {_md(step['title'])}", "",
+                      f"- Goal: {_md(step['goal'])}",
+                      f"- Actions: {_md('; '.join(step['actions']))}",
+                      f"- Inputs: {_md('; '.join(step['inputs']))}",
+                      "- Outputs/evidence:"]
+            for output in step["outputs"]:
+                schema = schema_map[(output["schema_id"], output["schema_version"])]
+                lines.append(f"  - `{output['path']}` → `{output['schema_id']}@{output['schema_version']}` "
+                             f"({schema['path']}); evidence: {_md(output['evidence'])}")
+            lines += [f"- Requirements: {', '.join(step['requirement_ids'])}; cases: {', '.join(step['case_ids'])}",
+                      f"- Depends on: {deps}; schedule: {schedule}",
+                      f"- Agent: {_md(step['agent']['role'])}; isolated scope: {_md(step['agent']['scope'])}; "
+                      f"write scope: {', '.join(step['agent']['write_scope'])}; merge owner: {_md(step['agent']['merge_owner'])}",
+                      f"- Join gate: {_md(step['agent']['join_gate'])}", "- Exit criteria:"]
+            lines.extend(f"  - {criterion['id']}: {_md(criterion['condition'])}; evidence: {_md(criterion['evidence'])}"
+                         for criterion in step["exit_criteria"])
+            failure = step["failure_policy"]
+            lines += [f"- Failure: {failure['action']} (max attempts {failure['max_attempts']}); "
+                      f"terminal state: {failure['terminal_state']}; recovery: {failure['recovery_policy']}", ""]
     if analysis and analysis.get("assumptions"):
-        lines += ["", "## Assumptions", ""] + [f"- {_md(x)}" for x in analysis["assumptions"]]
+        lines += ["", "## Assumptions", ""]
+        lines.extend(f"- {_md(row.get('id', ''))}: {_md(row['statement'])}; impact: {_md(row['impact'])}; "
+                     f"validation: {_md(row['validation'])}" if isinstance(row, dict) else f"- {_md(row)}"
+                     for row in analysis["assumptions"])
     if analysis and analysis.get("external_dependencies"):
-        lines += ["", "## External dependencies", ""] + [f"- {_md(x)}" for x in analysis["external_dependencies"]]
+        lines += ["", "## External dependencies", ""]
+        lines.extend(f"- {_md(row.get('id', ''))}: {_md(row['name'])} — {_md(row['purpose'])}; "
+                     f"required: {row['required']}; availability: {_md(row['availability'])}; "
+                     f"failure behavior: {_md(row['failure_behavior'])}"
+                     if isinstance(row, dict) else f"- {_md(row)}"
+                     for row in analysis["external_dependencies"])
+    if analysis and analysis.get("risk_assessments"):
+        lines += ["", "## Risk applicability", ""]
+        lines.extend(f"- {row['dimension']}: {'applicable' if row['applicable'] else 'not applicable'}; "
+                     f"{_md(row['basis'])}; scenarios: {', '.join(row['scenario_ids']) or 'none'}"
+                     for row in analysis["risk_assessments"])
     lines += [""] + _execution_phase_markdown(analysis, agent_parallelism=agent_parallelism)
     lines += ["", "## Acceptance criteria", "",
               "- Every required behavior is covered by the frozen, independently reviewed cases.",

@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .common import RefinerError, digest, manifest, read_json
+from .artifact_validation import validate_skill_schema_package
 from .stages import verify_stage_manifest
 
 
@@ -215,6 +216,13 @@ def _verify_pipeline(root: Path, *, expected_status: set[str]) -> dict:
         raise RefinerError("Development plan contains no executable cases")
     if not isinstance(acceptance.get("cases"), list) or not acceptance["cases"]:
         raise RefinerError("Acceptance plan contains no executable cases")
+    if plan.get("schema_version") in {"skill-refiner.plan/v4", "skill-refiner.plan/v5"}:
+        if (acceptance.get("schema_version") != plan.get("schema_version")
+                or acceptance.get("stage_contracts") != plan.get("stage_contracts")):
+            raise RefinerError("Independent acceptance changed the frozen Skill stage/schema contract")
+    if (plan.get("schema_version") == "skill-refiner.plan/v5"
+            and acceptance.get("execution_plan") != plan.get("execution_plan")):
+        raise RefinerError("Independent acceptance changed the frozen execution plan")
     if acceptance.get("coverage_gaps") or plan.get("coverage_gaps"):
         raise RefinerError("A completed run cannot contain unresolved coverage gaps")
     _verify_phase_history(state)
@@ -232,6 +240,11 @@ def _verify_pipeline(root: Path, *, expected_status: set[str]) -> dict:
     final = Path(state.get("final_skill", "")).resolve()
     if not (final / "SKILL.md").is_file() or not final.is_dir():
         raise RefinerError("Accepted candidate Skill is missing")
+    if plan.get("schema_version") in {"skill-refiner.plan/v4", "skill-refiner.plan/v5"}:
+        try:
+            validate_skill_schema_package(final, plan["stage_contracts"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RefinerError(f"Delivered Skill schema/validator package failed verification: {exc}") from exc
     evidence = read_json(_required_file(root, "final/evidence.json"))
     candidate_manifest = manifest(final)
     if evidence.get("candidate_manifest") != candidate_manifest:
