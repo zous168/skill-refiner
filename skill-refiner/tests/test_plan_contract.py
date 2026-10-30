@@ -23,9 +23,11 @@ sys.path.insert(0, str(SCRIPTS))
 from refiner.checks import validate_plan  # noqa: E402
 from refiner.agent import Agent as RefinerAgent  # noqa: E402
 from refiner.common import (PlanGateError, RefinerError, inventory, manifest, read_json,
-                            run_process, write_json)  # noqa: E402
-from refiner.creation import ANALYSIS, analysis_markdown, validate_analysis  # noqa: E402
-from refiner.plan import _source_overview, write_test_scenarios, write_work_plan  # noqa: E402
+                            PlanValidationError, run_process, write_json)  # noqa: E402
+from refiner.creation import (ANALYSIS, ANALYSIS_REVIEW, analysis_markdown, validate_analysis,
+                              validate_analysis_review)  # noqa: E402
+from refiner.plan import (parallel_agent_plan, _source_overview, write_test_scenarios,
+                          write_work_plan)  # noqa: E402
 from refiner.pipeline import (PLAN_REVIEW_CASE_BOOLS, close_incomplete_plan_gate,
                               close_incomplete_planning_phases, initial_phase_results, make_plan,
                               make_plan_suites, require_plan_gate, set_phase_result,
@@ -228,7 +230,21 @@ class AgentPlanningConcurrencyTests(unittest.TestCase):
         self.assertIs(planned, development)
         self.assertIs(accepted, acceptance)
         self.assertEqual(peak, 2, "both independent Agent branches must overlap")
-        self.assertEqual([status for status, _ in wave_events], ["running", "passed"])
+        self.assertEqual([status for status, _ in wave_events],
+                         ["running", "task_finished", "task_finished", "passed"])
+        schedule = wave_events[0][1]
+        self.assertEqual(schedule["wave_id"], "PW-PLAN-01")
+        self.assertEqual(schedule["max_parallel_agents"], 2)
+        self.assertEqual([task["id"] for task in schedule["tasks"]],
+                         ["AG-DEV-REVIEW", "AG-ACCEPTANCE-PLAN"])
+        self.assertEqual(set(schedule["tasks"][0]["write_scope"]) & set(schedule["tasks"][1]["write_scope"]), set())
+        self.assertIn("opens the plan gate", schedule["join_gate"])
+        self.assertEqual(wave_events[-1][1]["task_results"], [
+            {"id": "AG-DEV-REVIEW", "status": "passed"},
+            {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"},
+        ])
+        self.assertEqual([event[1]["task_id"] for event in wave_events[1:3]],
+                         ["AG-DEV-REVIEW", "AG-ACCEPTANCE-PLAN"])
 
     def test_agent_parallelism_one_runs_plan_branches_sequentially(self):
         calls = []
@@ -246,6 +262,21 @@ class AgentPlanningConcurrencyTests(unittest.TestCase):
                              wave_callback=lambda status, **data: waves.append((status, data)))
         self.assertEqual(calls, ["plan", "acceptance-plan"])
         self.assertEqual(waves[0][0], "serial")
+        self.assertEqual([status for status, _ in waves],
+                         ["serial", "task_started", "task_finished", "task_started", "task_finished", "passed"])
+        self.assertEqual(waves[0][1]["serial_reason"],
+                         "--agent-parallelism=1; the tasks are logically independent but the configured concurrency cap is one")
+        self.assertEqual([row["status"] for row in waves[-1][1]["task_results"]], ["passed", "passed"])
+
+    def test_parallel_agent_plan_exposes_dependencies_scopes_and_join_gate(self):
+        plan = parallel_agent_plan(2)
+        self.assertEqual(plan["schedule"], "parallel")
+        self.assertEqual(plan["starts_when"], "development plan is frozen and its complete local control set passes")
+        self.assertTrue(all(task["depends_on"] and task["inputs"] and task["outputs"]
+                            and task["write_scope"] for task in plan["tasks"]))
+        self.assertEqual(set(plan["tasks"][0]["write_scope"]) & set(plan["tasks"][1]["write_scope"]),
+                         set(), "parallel tasks must have disjoint write scopes")
+        self.assertIn("plan gate", plan["join_gate"])
 
     def test_unsupported_agent_parallelism_is_rejected(self):
         for parallelism in (0, 3):
@@ -271,6 +302,10 @@ class AgentPlanningConcurrencyTests(unittest.TestCase):
                                  wave_callback=lambda status, **data: waves.append((status, data)))
         self.assertTrue(peer_finished.is_set(), "the already-started acceptance branch must be joined")
         self.assertEqual([status for status, _ in waves], ["running", "failed"])
+        self.assertEqual(waves[-1][1]["task_results"], [
+            {"id": "AG-DEV-REVIEW", "status": "failed", "error": "development review rejected the plan"},
+            {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"},
+        ])
 
     def test_agent_call_counter_and_artifacts_are_safe_under_parallel_requests(self):
         barrier = threading.Barrier(2)
@@ -339,12 +374,24 @@ class BackupInventoryTests(unittest.TestCase):
 
 def _case(case_id, kind, scenario, expected_outcome, prompt, requirement_id="R1"):
     token = f"token-{case_id}"
+    dimension = {"normal": "input_variation", "boundary": "workflow_state", "error": "dependency_failure",
+                 "negative": "safety_boundary", "regression": "retry_recovery"}[kind]
     return {
         "id": case_id,
         "requirement_ids": [requirement_id],
+        "acceptance_criteria_ids": [f"{requirement_id}.A1"],
+        "scenario_id": f"S-{case_id}",
         "kind": kind,
         "scenario": scenario,
         "expected_outcome": expected_outcome,
+        "scenario_detail": {
+            "title": scenario, "preconditions": [f"The {case_id} fixture is available and isolated."],
+            "stimulus": prompt, "actions": [f"Run the {case_id} scenario through the Skill."],
+            "expected_observables": [expected_outcome],
+            "forbidden_outcomes": ["The executor must not invent evidence or perform an unauthorized side effect."],
+            "risk_dimensions": [dimension],
+            "basis": f"{case_id} checks an independently observable business result.",
+        },
         "prompt": prompt,
         "files": {},
         "helpers": [],
@@ -372,7 +419,9 @@ def _case(case_id, kind, scenario, expected_outcome, prompt, requirement_id="R1"
 
 
 def _minimal_plan(**case_overrides):
-    requirements = [{"id": "R1", "behavior": "Do the thing", "source": "requirements.md#R1", "required": True}]
+    requirements = [{"id": "R1", "behavior": "Do the thing", "source": "requirements.md#R1", "required": True,
+                     "acceptance_criteria": [{"id": "R1.A1", "statement": "Return the requested result.",
+                                               "evidence": "The response includes the requested result token."}]}]
     normal = _case("dev-normal", "normal", "Operator starts a valid task.", "Task completes with visible proof.",
                    "Execute the documented valid task path with explicit executor wording.")
     boundary = _case("dev-boundary", "boundary", "Operator supplies incomplete input.", "Clarification without side effects.",
@@ -383,7 +432,7 @@ def _minimal_plan(**case_overrides):
         elif key in boundary:
             boundary[key] = value
     return {
-        "schema_version": "skill-refiner.plan/v2",
+        "schema_version": "skill-refiner.plan/v3",
         "requirements": requirements,
         "cases": [normal, boundary],
         "coverage_gaps": [],
@@ -406,6 +455,9 @@ def _contract_entry(case_id, **flags):
         "asset_audit_consistent": True,
         "positive_controls_validated": True,
         "negative_controls_targeted": True,
+        "acceptance_criteria_traceable": True,
+        "scenario_detail_complete": True,
+        "risk_coverage_complete": True,
         "basis": "Fixture and checks align with the frozen case contract.",
     }
     entry.update(flags)
@@ -436,6 +488,48 @@ class PlanCaseFieldValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(jsonschema.ValidationError):
                 validate_plan(plan, root)
+
+    def test_structured_scenario_detail_is_required(self):
+        plan = _minimal_plan()
+        del plan["cases"][0]["scenario_detail"]["preconditions"]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(jsonschema.ValidationError):
+                validate_plan(plan, root)
+
+    def test_every_required_atomic_acceptance_criterion_needs_a_case(self):
+        plan = _minimal_plan()
+        plan["requirements"][0]["acceptance_criteria"].append(
+            {"id": "R1.A2", "statement": "Respect the requested output shape.",
+             "evidence": "The result follows the requested output shape."})
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(PlanValidationError) as ctx:
+                validate_plan(plan, root)
+        self.assertIn("R1.A2", str(ctx.exception))
+        self.assertIn("acceptance_criteria", str(ctx.exception))
+
+    def test_duplicate_scenario_detail_is_not_counted_as_new_coverage(self):
+        plan = _minimal_plan()
+        plan["cases"][1]["scenario_detail"] = json.loads(json.dumps(plan["cases"][0]["scenario_detail"]))
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(PlanValidationError) as ctx:
+                validate_plan(plan, root)
+        self.assertIn("meaningfully distinct scenario", str(ctx.exception))
+
+    def test_creation_scenario_matrix_must_be_preserved_by_executable_cases(self):
+        plan = _minimal_plan()
+        sources = [{"id": case["scenario_id"], "kind": case["kind"], "applicable": True,
+                    "situation": case["scenario"], "requirement_ids": case["requirement_ids"],
+                    "acceptance_criteria_ids": case["acceptance_criteria_ids"],
+                    "detail": json.loads(json.dumps(case["scenario_detail"])),
+                    "basis": "Frozen business scenario basis.", "exclusion_reason": ""}
+                   for case in plan["cases"]]
+        plan["cases"][1]["scenario_detail"]["expected_observables"] = [
+            "An outcome that contradicts the frozen business scenario."
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(PlanValidationError) as ctx:
+                validate_plan(plan, root, expected_scenarios=sources)
+        self.assertIn("preserve the frozen scenario ID, trace, expected outcomes", str(ctx.exception))
 
     def test_asset_audit_cannot_claim_a_missing_source_asset(self):
         plan = _minimal_plan()
@@ -794,18 +888,41 @@ class PlanMarkdownRenderingTests(unittest.TestCase):
         self.assertIn("showing this plan is a visibility checkpoint, not an approval wait", work_plan)
         self.assertIn("exhausted configured budget", work_plan)
         self.assertIn("Bounded Agent concurrency", work_plan)
-        self.assertIn("development plan's independent review overlaps with acceptance-plan generation", work_plan)
+        self.assertIn("Bounded Agent concurrency and dependency-aware work plan", work_plan)
+        self.assertIn("AG-DEV-REVIEW", work_plan)
+        self.assertIn("AG-ACCEPTANCE-PLAN", work_plan)
+        self.assertIn("Isolated scope:", work_plan)
+        self.assertIn("join gate:", work_plan)
+        self.assertIn("Other dependent phases remain serial", work_plan)
         self.assertIn("Cases within one skill-up executor remain sequential", work_plan)
-        self.assertIn("Controller Agent planning runs sequentially", serial_work_plan)
+        self.assertIn("Serial reason: --agent-parallelism=1", serial_work_plan)
 
 
 class CreationAnalysisConclusionTests(unittest.TestCase):
+    @staticmethod
+    def _scenario(scenario_id, kind, applicable, situation, stimulus, *, exclusion_reason=""):
+        return {
+            "id": scenario_id, "kind": kind, "applicable": applicable, "situation": situation,
+            "requirement_ids": ["R1"], "acceptance_criteria_ids": ["R1.A1"],
+            "detail": {"title": situation, "preconditions": ["The isolated request fixture is available."],
+                       "stimulus": stimulus, "actions": ["Submit the fixture and inspect the response."],
+                       "expected_observables": ["The response contains the documented result fields."],
+                       "forbidden_outcomes": ["No unauthorized write or unsupported claim is produced."],
+                       "risk_dimensions": ["input_variation" if kind == "normal" else
+                                           "workflow_state" if kind == "boundary" else "dependency_failure"],
+                       "basis": "This scenario is grounded in source requirement R1."},
+            "basis": "This scenario exercises observable behavior from R1.",
+            "exclusion_reason": exclusion_reason,
+        }
+
     def _analysis(self):
         return {
             "name": "demo-skill",
             "goal": "Complete the requested business workflow.",
             "requirements": [
-                {"id": "R1", "behavior": "Return a useful result.", "source": "spec-1: requested result", "required": True},
+                {"id": "R1", "behavior": "Return a useful result.", "source": "spec-1: requested result", "required": True,
+                 "acceptance_criteria": [{"id": "R1.A1", "statement": "Return the requested result fields.",
+                                           "evidence": "Each requested field appears in the response."}]},
             ],
             "workflow": [
                 {"id": "W1", "action": "Process the request.", "inputs": "Request text.",
@@ -813,15 +930,16 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
                  "failure_behavior": "Report the missing field and stop.", "requirement_ids": ["R1"]},
             ],
             "scenarios": [
-                {"kind": "normal", "applicable": True, "situation": "Valid request.",
-                 "expected_behavior": "Return the requested result.", "basis": "R1",
-                 "requirement_ids": ["R1"]},
-                {"kind": "boundary", "applicable": False, "situation": "No extra boundary case.",
-                 "expected_behavior": "Not applicable to this scope.", "basis": "No boundary behavior requested.",
-                 "requirement_ids": []},
-                {"kind": "error", "applicable": False, "situation": "No extra error case.",
-                 "expected_behavior": "Not applicable to this scope.", "basis": "No error behavior requested.",
-                 "requirement_ids": []},
+                self._scenario("SC-NORMAL-01", "normal", True, "Valid request with all required fields.",
+                               "Submit a valid request containing every required field."),
+                self._scenario("SC-NORMAL-02", "normal", True, "Valid request with a supported alternate input.",
+                               "Submit an alternate supported input that exercises the same business outcome."),
+                self._scenario("SC-BOUNDARY-01", "boundary", False, "Request omits an optional field.",
+                               "Submit the request without the optional field.",
+                               exclusion_reason="The source contract defines no behavior for this optional field."),
+                self._scenario("SC-ERROR-01", "error", False, "A documented dependency is unavailable.",
+                               "Make the declared dependency unavailable before submission.",
+                               exclusion_reason="The requested Skill has no external dependency."),
             ],
             "assumptions": [], "external_dependencies": [], "blocking_questions": [],
         }
@@ -829,10 +947,50 @@ class CreationAnalysisConclusionTests(unittest.TestCase):
     def test_business_workflow_step_requires_observable_completion_check(self):
         analysis = self._analysis()
         validate_analysis(analysis)
+        self.assertIn("R1.A1: Return the requested result fields.", analysis_markdown(analysis))
+        self.assertIn("SC-NORMAL-02", analysis_markdown(analysis))
         self.assertIn("Completion check: The result contains the requested fields.", analysis_markdown(analysis))
         del analysis["workflow"][0]["completion_check"]
         with self.assertRaises(jsonschema.ValidationError):
             validate_analysis(analysis)
+
+    def test_every_required_atomic_criterion_must_appear_in_an_applicable_scenario(self):
+        analysis = self._analysis()
+        analysis["requirements"][0]["acceptance_criteria"].append(
+            {"id": "R1.A2", "statement": "Keep the result within the requested scope.",
+             "evidence": "The response contains no unrequested operation."})
+        with self.assertRaisesRegex(RefinerError, "R1.A2"):
+            validate_analysis(analysis)
+
+    def test_excluded_scenario_requires_an_explicit_scope_reason(self):
+        analysis = self._analysis()
+        analysis["scenarios"][2]["exclusion_reason"] = ""
+        with self.assertRaises(jsonschema.ValidationError):
+            validate_analysis(analysis)
+
+    def test_independent_analysis_review_must_assess_every_scenario_and_criterion(self):
+        analysis = self._analysis()
+        review = {
+            "approved": True, "issues": [],
+            "requirement_assessments": [{"requirement_id": "R1", "grounded": True,
+                                         "acceptance_criteria_atomic": True, "criteria_observable": True,
+                                         "basis": "R1 and R1.A1 trace to the request."}],
+            "scenario_assessments": [{"scenario_id": row["id"], "detail_executable": True,
+                                      "risk_coverage_complete": True, "traceability_complete": True,
+                                      "basis": "Inputs, actions and outcomes are concrete."}
+                                     for row in analysis["scenarios"]],
+        }
+        validate_analysis_review(review, analysis)
+        review["scenario_assessments"].pop()
+        with self.assertRaisesRegex(RefinerError, "every scenario exactly once"):
+            validate_analysis_review(review, analysis)
+        review["scenario_assessments"] = [
+            {"scenario_id": row["id"], "detail_executable": True,
+             "risk_coverage_complete": row["kind"] != "normal", "traceability_complete": True,
+             "basis": "A normal scenario is incorrectly marked incomplete."}
+            for row in analysis["scenarios"]]
+        with self.assertRaisesRegex(RefinerError, "contradicts"):
+            validate_analysis_review(review, analysis)
 
 
 if __name__ == "__main__":

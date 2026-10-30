@@ -15,7 +15,7 @@ from .agent import Agent
 from .common import Cancelled, RefinerError, digest, manifest, read_json, snapshot, write_json
 from .pipeline import apply_changes, run as refine
 from .profiles import load_config
-from .schemas import PLAN, REVIEW
+from .schemas import PLAN, REQUIREMENTS, REVIEW, SCENARIO_INTENT
 from .standards import AUTHORING, discover_project_standards, lint
 from .stages import StageManifest, CREATE_EVENTS
 from .plan import write_test_scenarios, write_work_plan
@@ -58,30 +58,36 @@ ANALYSIS = {
                  "external_dependencies", "blocking_questions"],
     "properties": {
         "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
-        "goal": STRING, "requirements": PLAN["properties"]["requirements"],
+        "goal": STRING, "requirements": REQUIREMENTS,
         "workflow": {"type": "array", "minItems": 1, "items": {
             "type": "object", "additionalProperties": False,
             "required": ["id", "action", "inputs", "outputs", "completion_check", "failure_behavior", "requirement_ids"],
             "properties": {"id": STRING, "action": STRING, "inputs": STRING, "outputs": STRING,
                            "completion_check": {"type": "string", "minLength": 8},
                            "failure_behavior": STRING, "requirement_ids": IDS}}},
-        "scenarios": {"type": "array", "minItems": 3, "maxItems": 3, "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["kind", "applicable", "situation", "expected_behavior", "basis", "requirement_ids"],
-            "properties": {"kind": {"enum": ["normal", "boundary", "error"]},
-                           "applicable": {"type": "boolean"}, "situation": STRING,
-                           "expected_behavior": STRING, "basis": STRING,
-                           "requirement_ids": STRINGS}}},
+        "scenarios": {"type": "array", "minItems": 3, "items": SCENARIO_INTENT},
         "assumptions": STRINGS, "external_dependencies": STRINGS, "blocking_questions": STRINGS,
     },
 }
 ANALYSIS_REVIEW = {
-    **REVIEW, "required": ["approved", "issues", "requirement_assessments"],
+    **REVIEW,
     "properties": {**REVIEW["properties"], "requirement_assessments": {
         "type": "array", "minItems": 1, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["requirement_id", "grounded", "basis"],
-            "properties": {"requirement_id": STRING, "grounded": {"type": "boolean"}, "basis": STRING}}}},
+            "required": ["requirement_id", "grounded", "acceptance_criteria_atomic",
+                         "criteria_observable", "basis"],
+            "properties": {"requirement_id": STRING, "grounded": {"type": "boolean"},
+                           "acceptance_criteria_atomic": {"type": "boolean"},
+                           "criteria_observable": {"type": "boolean"}, "basis": STRING}}},
+        "scenario_assessments": {"type": "array", "minItems": 3, "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["scenario_id", "detail_executable", "risk_coverage_complete",
+                         "traceability_complete", "basis"],
+            "properties": {"scenario_id": STRING, "detail_executable": {"type": "boolean"},
+                           "risk_coverage_complete": {"type": "boolean"},
+                           "traceability_complete": {"type": "boolean"}, "basis": STRING}}},
+    },
+    "required": ["approved", "issues", "requirement_assessments", "scenario_assessments"],
 }
 DRAFT = {
     "type": "object", "additionalProperties": False,
@@ -143,19 +149,44 @@ def validate_analysis(analysis, requested_name=None, source_ids=None):
                            'authoring standards belong in standards review, not in the business test contract')
     if len(set(ids)) != len(ids) or any(not x.strip() for x in ids):
         raise RefinerError("Business requirement IDs must be nonempty and unique")
-    if {s["kind"] for s in analysis["scenarios"]} != {"normal", "boundary", "error"}:
-        raise RefinerError("Analyze normal, boundary and error categories exactly once")
-    if not next(s for s in analysis["scenarios"] if s["kind"] == "normal")["applicable"]:
+    if not {"normal", "boundary", "error"} <= {s["kind"] for s in analysis["scenarios"]}:
+        raise RefinerError("Analysis must assess normal, boundary and error scenario categories")
+    if not any(s["kind"] == "normal" and s["applicable"] for s in analysis["scenarios"]):
         raise RefinerError("Normal business behavior must have an executable scenario")
+    criteria_by_requirement = {r["id"]: {c["id"] for c in r["acceptance_criteria"]}
+                               for r in analysis["requirements"]}
+    criterion_ids = [criterion["id"] for req in analysis["requirements"]
+                     for criterion in req["acceptance_criteria"]]
+    if len(criterion_ids) != len(set(criterion_ids)):
+        raise RefinerError("Acceptance criterion IDs must be globally unique")
+    scenario_ids = [s["id"] for s in analysis["scenarios"]]
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise RefinerError("Scenario IDs must be unique")
+    scenario_signatures = [json.dumps({"kind": row["kind"], "situation": row["situation"],
+                                       "detail": row["detail"]}, ensure_ascii=False,
+                                      sort_keys=True).casefold()
+                           for row in analysis["scenarios"]]
+    if len(scenario_signatures) != len(set(scenario_signatures)):
+        raise RefinerError("Scenario matrix contains duplicate situations and execution details")
     for item in analysis["workflow"] + analysis["scenarios"]:
         if not set(item["requirement_ids"]) <= set(ids):
             raise RefinerError("Workflow or scenario references an unknown business requirement")
-    if any(s["applicable"] and not s["requirement_ids"] for s in analysis["scenarios"]):
-        raise RefinerError("Applicable scenarios must map to business requirements")
-    required = {r["id"] for r in analysis["requirements"] if r["required"]}
-    covered = {rid for s in analysis["scenarios"] if s["applicable"] for rid in s["requirement_ids"]}
-    if not required <= covered:
-        raise RefinerError("Business scenario intents omit required behaviors: " + ", ".join(sorted(required - covered)))
+    for scenario in analysis["scenarios"]:
+        allowed_criteria = set().union(*(criteria_by_requirement[rid]
+                                         for rid in scenario["requirement_ids"])) if scenario["requirement_ids"] else set()
+        if not set(scenario["acceptance_criteria_ids"]) <= allowed_criteria:
+            raise RefinerError(f"Scenario {scenario['id']} references an acceptance criterion outside its requirements")
+        if scenario["applicable"] and (not scenario["requirement_ids"] or not scenario["acceptance_criteria_ids"]):
+            raise RefinerError(f"Applicable scenario {scenario['id']} must map to requirements and acceptance criteria")
+        if not scenario["applicable"] and not scenario["exclusion_reason"].strip():
+            raise RefinerError(f"Excluded scenario {scenario['id']} needs a scope-based reason")
+    required_criteria = {c["id"] for r in analysis["requirements"] if r["required"]
+                         for c in r["acceptance_criteria"]}
+    covered_criteria = {criterion_id for scenario in analysis["scenarios"] if scenario["applicable"]
+                        for criterion_id in scenario["acceptance_criteria_ids"]}
+    if not required_criteria <= covered_criteria:
+        raise RefinerError("Scenario matrix omits required acceptance criteria: " +
+                           ", ".join(sorted(required_criteria - covered_criteria)))
 
 
 def validate_analysis_review(review, analysis):
@@ -165,23 +196,45 @@ def validate_analysis_review(review, analysis):
     expected = {r["id"] for r in analysis["requirements"]}
     if len(rows) != len(expected) or {r["requirement_id"] for r in rows} != expected:
         raise RefinerError("Analysis review must assess every requirement exactly once")
-    if review["approved"] and not all(r["grounded"] for r in rows):
-        raise RefinerError("Analysis approval contradicts requirement grounding")
+    scenarios = review["scenario_assessments"]
+    expected_scenarios = {row["id"] for row in analysis["scenarios"]}
+    assessed_scenarios = [row["scenario_id"] for row in scenarios]
+    if len(assessed_scenarios) != len(set(assessed_scenarios)) or set(assessed_scenarios) != expected_scenarios:
+        raise RefinerError("Analysis review must assess every scenario exactly once")
+    req_ok = all(all(row[key] for key in ("grounded", "acceptance_criteria_atomic", "criteria_observable"))
+                 for row in rows)
+    scenario_ok = all(all(row[key] for key in
+                          ("detail_executable", "risk_coverage_complete", "traceability_complete"))
+                      for row in scenarios)
+    if review["approved"] and not (req_ok and scenario_ok):
+        raise RefinerError("Analysis approval contradicts requirement or scenario completeness assessments")
 
 
 def analysis_markdown(analysis):
     lines = ["# Business analysis", "", analysis["goal"], "", "## Requirements", ""]
-    lines += [f"- {r['id']}: {r['behavior']} (source: {r['source']}; required={r['required']})"
-              for r in analysis["requirements"]]
+    for req in analysis["requirements"]:
+        lines.append(f"- {req['id']}: {req['behavior']} (source: {req['source']}; required={req['required']})")
+        lines.extend(f"  - {criterion['id']}: {criterion['statement']} Evidence: {criterion['evidence']}"
+                     for criterion in req["acceptance_criteria"])
     lines += ["", "## Workflow", ""]
     for step in analysis["workflow"]:
         lines += [f"- {step['id']}: {step['action']}", f"  Input: {step['inputs']}; output: {step['outputs']}",
                   f"  Completion check: {step['completion_check']}",
                   f"  Failure: {step['failure_behavior']}; requirements: {', '.join(step['requirement_ids'])}"]
-    lines += ["", "## Scenario intents", ""]
+    lines += ["", "## Detailed scenario matrix", ""]
     for scenario in analysis["scenarios"]:
-        lines += [f"- {scenario['kind']} (applicable={scenario['applicable']}): {scenario['situation']}",
-                  f"  Expected: {scenario['expected_behavior']}; basis: {scenario['basis']}"]
+        detail = scenario["detail"]
+        lines += [f"- {scenario['id']} ({scenario['kind']}; applicable={scenario['applicable']}): {scenario['situation']}",
+                  f"  Requirements: {', '.join(scenario['requirement_ids'])}; criteria: "
+                  f"{', '.join(scenario['acceptance_criteria_ids'])}",
+                  f"  Preconditions: {'; '.join(detail['preconditions'])}",
+                  f"  Stimulus: {detail['stimulus']}",
+                  f"  Actions: {'; '.join(detail['actions'])}",
+                  f"  Expected: {'; '.join(detail['expected_observables'])}",
+                  f"  Forbidden: {'; '.join(detail['forbidden_outcomes'])}",
+                  f"  Risk dimensions: {', '.join(detail['risk_dimensions'])}; basis: {scenario['basis']}"]
+        if not scenario["applicable"]:
+            lines.append(f"  Excluded because: {scenario['exclusion_reason']}")
     for title, key in [("Assumptions", "assumptions"), ("External dependencies", "external_dependencies"),
                        ("Blocking questions", "blocking_questions")]:
         lines += ["", "## " + title, ""] + ["- " + x for x in analysis[key]]
@@ -446,9 +499,19 @@ def run(args):
                 'these sources. For every workflow step, include a concrete completion_check that names observable '
                 'evidence proving the step is complete; do not use generic wording such as "done". Authoring standards, trigger description quality, script organization and controller '
                 'integrity remain in standards review; do not add them as business test requirements unless the user '
-                'explicitly requested that as an externally observable business capability. Analyze workflow inputs, outputs, order, decisions and failure '
-                'behavior. Assess normal, boundary and error scenario categories exactly once each. Map all required '
-                'behaviors to applicable scenario intents. These are scenario intents, not frozen tests or implementation. '
+                'explicitly requested that as an externally observable business capability. Split each material business '
+                'requirement into small, independently observable acceptance_criteria; each criterion has a stable ID, one '
+                'outcome and evidence that could prove it. Do not combine separate decisions, outputs, permissions or side '
+                'effects into one criterion. Analyze the full workflow: actors, input variants, preconditions, state transitions, '
+                'decisions, outputs, side effects, dependencies, permissions, failure behavior, retries, interruption and '
+                'recovery where they apply. Build a scenario inventory with stable IDs; use multiple scenarios per category '
+                'when distinct requirements or risk conditions need different evidence. Assess normal, boundary and error '
+                'categories, and give a concrete scope reason for exclusions. Each applicable scenario states preconditions, '
+                'a concrete stimulus, ordered actions, observable expected outcomes, forbidden outcomes, risk dimensions, '
+                'linked requirement IDs and acceptance criterion IDs, and a source-based basis. Every required criterion must '
+                'appear in at least one applicable scenario. Distinguish scenarios that exercise different actors, states, '
+                'inputs, dependencies, side effects or recovery paths; paraphrases and cosmetic data changes do not add coverage. '
+                'These are detailed scenario intents, not frozen executable tests or implementation. '
                 'Do not add arbitrary business rules, integrations or approval policies. Explicitly record reasonable '
                 'nonmaterial implementation assumptions; missing material business rules belong in blocking_questions. '
                 'Each blocking question must be concise and answerable, state the material choice needed, and avoid '
@@ -466,8 +529,15 @@ def run(args):
                     return state
                 review = agent.ask('analysis-review',
                     'Independently review business analysis against the original request and supplied standards. '
-                    'Check every requested behavior is retained and each derived requirement is grounded; cite the '
-                    'specific request or explicit reasonable implementation assumption for every assessment. Check '
+                    'Check every requested behavior is retained, requirements are decomposed into atomic acceptance '
+                    'criteria with independently observable evidence, and every criterion is grounded; cite the '
+                    'specific request or explicit reasonable implementation assumption for every assessment. Assess every '
+                    'scenario ID exactly once. Reject scenarios lacking preconditions, a concrete stimulus, ordered actions, '
+                    'observable expected outcomes, forbidden outcomes, risk dimensions or requirement/criterion traceability. '
+                    'Confirm every required criterion is covered by an applicable scenario; inspect workflow-state, permissions, '
+                    'dependencies, cross-requirement effects, side effects, retries/idempotency and recovery when they apply. '
+                    'Reject duplicate scenarios that only paraphrase the same situation and evidence. An excluded scenario '
+                    'needs a concrete scope-based explanation. Check '
                     'that each workflow step has a concrete observable completion_check, and that its inputs, outputs, '
                     'failure behavior and requirement links are clear. Reject '
                     'invented material business rules, omitted workflows, fabricated dependencies, arbitrary error '
@@ -555,16 +625,20 @@ def run(args):
                                   if path.is_dir() and path.name.split("-", 1)[1].isdigit()]
                 archived = attempts / f"attempt-{max(prior_attempts, default=0)+1:03}"
                 shutil.move(child.output, archived)
+        applicable_scenarios = [s for s in analysis['scenarios'] if s['applicable']]
         child.creation_context = {'contract': analysis['requirements'], 'business_analysis': analysis,
                                   'execution_helpers': PYTHON_OBSERVER_GUIDE,
-                                  'required_case_kinds': [s['kind'] for s in analysis['scenarios'] if s['applicable']]}
+                                  'required_case_kinds': sorted({s['kind'] for s in applicable_scenarios}),
+                                  'required_scenario_ids': [s['id'] for s in applicable_scenarios]}
         if resumed_suite:
             prior_context = read_json(resumed_suite/'inputs.json')
             child.spec = [row['source'] for row in prior_context['requirements']]
             child.standard = [row['source'] for row in prior_context['standards'] if isinstance(row,dict)]
             child.reuse_plan = str(resumed_suite)
-        if max(len(child.creation_context['required_case_kinds']), 2) > min(args.max_cases, args.acceptance_cases):
-            raise RefinerError('Case limits cannot cover all applicable scenario categories')
+        scenario_minimum = max(len(child.creation_context['required_scenario_ids']), 2)
+        if scenario_minimum > min(args.max_cases, args.acceptance_cases):
+            raise RefinerError('Development/acceptance case limits cannot cover every applicable scenario ID; '
+                               f'{scenario_minimum} scenarios require at least that many cases in each suite')
         event('refining', refinement_workspace=child.output)
         refinement = refine(child)
         integrity()

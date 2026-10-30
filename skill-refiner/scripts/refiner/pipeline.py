@@ -15,14 +15,14 @@ from .agent import Agent
 from .checks import validate_plan
 from .common import (Cancelled, PlanControlError, PlanGateError, PlanValidationError, RefinerError, digest, inventory, manifest, read_json, relative_path,
                      snapshot, write_json)
-from .schemas import PLAN, PLAN_REVIEW, REPAIR, REVIEW
+from .schemas import PLAN, PLAN_REVIEW, PLAN_REVIEW_V2, REPAIR, REVIEW
 from .evidence import repair_evidence
 from .skillup import SkillUp
 from .standards import AUTHORING, discover_project_standards, lint
 from .profiles import load_config
 from .matrix import Matrix, comparison_markdown
 from .stages import StageManifest, REFINE_EVENTS
-from .plan import write_test_scenarios, write_work_plan
+from .plan import parallel_agent_plan, write_test_scenarios, write_work_plan
 
 
 PHASE_STATUS_ENUM = ("not_started", "pending", "running", "passed", "failed", "error", "skipped", "reused")
@@ -186,7 +186,17 @@ executable user tasks with concrete fixtures and independently justified expecte
 put the expected answer into the user's prompt. Capability tests should explicitly ask to use the
 installed Skill and its script when this is part of the contract; do not let the executor replace
 the target implementation with mental computation. Output checks test the final answer or workspace
-files, not SKILL.md text. Cover normal behavior and applicable boundaries/errors/negative cases.
+files, not SKILL.md text. Decompose each requirement into stable, independently observable acceptance
+criteria with its own evidence. Treat executable cases as a detailed scenario matrix: give each a
+unique scenario_id and identify preconditions, concrete stimulus, ordered actions, expected observable
+outcomes, forbidden outcomes, relevant risk dimensions and source basis. Vary scenarios where workflow
+state, actors/permissions, input boundaries, dependencies, cross-requirement effects, side effects,
+retries/idempotency or recovery change the correct result. Do not count paraphrases or cosmetic input
+changes as distinct coverage. Map each case to the exact acceptance criteria it exercises; cover every
+required criterion and each explicitly applicable scenario exactly once in the suite. Assess normal,
+boundary and error applicability, and state a scope-based reason for exclusions. If the configured
+case/evaluation budget cannot cover the justified matrix, report the uncovered items as a plan gap;
+never compress distinct risks into a vague case just to meet a cap.
 Use tool_command with a regular expression matching the actual interpreter/script invocation when
 executing the bundled script is a required behavior. It inspects real tool-call transcript commands,
 not the user's prompt. Installed paths vary across engines; do not invent an absolute/relative path
@@ -328,7 +338,7 @@ full prompt into scenario or expected_outcome."""
 PLANNING += """
 
 Schema-first JSON contract: read the supplied response_schema before planning. Return exactly one JSON
-object matching it, without Markdown fences or prose. Use schema_version=skill-refiner.plan/v2. Every case
+object matching it, without Markdown fences or prose. Use schema_version=skill-refiner.plan/v3. Every case
 must include every required field; always emit helpers as an array, using [] when no helper is needed.
 Use only the schema's kind and check-type enums. Give every check a unique stable id. Include an asset_audit
 with every fixture/helper path marked required and available, all linked requirement source_refs, a valid
@@ -354,12 +364,15 @@ PLAN_REVIEW_CASE_BOOLS = (
     "trace_checks_observable", "scenario_consistent", "requirement_trace_consistent",
     "expected_outcome_consistent", "machine_checks_consistent", "matrix_complete",
     "asset_audit_consistent", "positive_controls_validated", "negative_controls_targeted",
+    "acceptance_criteria_traceable", "scenario_detail_complete", "risk_coverage_complete",
 )
+PLAN_REVIEW_CASE_BOOLS_V2 = PLAN_REVIEW_CASE_BOOLS[:-3]
 
 
 def validate_plan_review(review, plan):
     import jsonschema
-    jsonschema.validate(review, PLAN_REVIEW)
+    legacy = plan.get("schema_version") == "skill-refiner.plan/v2"
+    jsonschema.validate(review, PLAN_REVIEW_V2 if legacy else PLAN_REVIEW)
     contracts = review["case_contracts"]
     expected = {c["id"] for c in plan["cases"]}
     assessed = [c["case_id"] for c in contracts]
@@ -370,7 +383,8 @@ def validate_plan_review(review, plan):
             raise RefinerError(f"Plan review references unknown case: {entry['case_id']}")
     if len(contracts) != len(expected) or set(assessed) != expected:
         raise RefinerError("Plan review must assess the execution contract of every case exactly once")
-    if review["approved"] and any(not all(entry[k] for k in PLAN_REVIEW_CASE_BOOLS) for entry in contracts):
+    required_flags = PLAN_REVIEW_CASE_BOOLS_V2 if legacy else PLAN_REVIEW_CASE_BOOLS
+    if review["approved"] and any(not all(entry[k] for k in required_flags) for entry in contracts):
         raise RefinerError("Approved plan review contains a conflicting execution contract")
 
 
@@ -390,6 +404,9 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                          ("Include at least one executable case of EACH required_case_kinds category: "
                           + ", ".join(context["required_case_kinds"]) + ". "
                           if context.get("required_case_kinds") else "") +
+                         ("Include one distinct executable case for each applicable required_scenario_ids entry; "
+                          "copy the source scenario details and keep the scenario_id stable. "
+                          if context.get("required_scenario_ids") else "") +
                          ("Use different inputs from common examples; these are independent acceptance cases. "
                           "Copy the supplied contract requirement list exactly, preserving IDs and all properties."
                           if role == "acceptance-plan" else ""),
@@ -465,7 +482,17 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                                           "expected_condition": sorted(context.get("required_case_kinds", [])),
                                           "actual_value": sorted({c["kind"] for c in plan["cases"]})})
             try:
-                control_results = validate_plan(plan, work, max_cases)
+                business_analysis = context.get("business_analysis") or {}
+                expected_scenarios = business_analysis.get("scenarios") or None
+                required_scenario_ids = context.get("required_scenario_ids")
+                if required_scenario_ids is None and expected_scenarios:
+                    required_scenario_ids = [row["id"] for row in expected_scenarios if row["applicable"]]
+                control_results = validate_plan(
+                    plan, work, max_cases,
+                    required_case_kinds=context.get("required_case_kinds", []),
+                    required_scenario_ids=required_scenario_ids or [],
+                    expected_scenarios=expected_scenarios,
+                    expected_requirements=context.get("contract"))
             except PlanValidationError as exc:
                 failed_evidence = {**exc.evidence, "suite": suite, "attempt": attempt + 1,
                                    "plan_sha256": digest(plan), "plan_snapshot": plan,
@@ -593,6 +620,15 @@ def make_plan(agent, context, work, max_cases, role="plan", max_attempts=2,
                            "fails only because a status/state field differs while its target business-meaning "
                            "assertion still passes. Confirm every previous case ID remains in a revision. "
                            "Reject approval when any case is unassessed, duplicated, unknown, or marked false. "
+                           "For each case also assess acceptance_criteria_traceable, scenario_detail_complete, "
+                           "and risk_coverage_complete. Map scenario_id to the matching detailed scenario; map the "
+                           "exact atomic acceptance criteria to linked requirements; and require observable checks "
+                           "for each expected result. Inspect preconditions, stimulus, ordered actions, expected "
+                           "observables, forbidden outcomes and risk dimensions. Require separate cases when actor, "
+                           "workflow state, permissions, dependencies, side effects or recovery paths change the result. "
+                           "Reject paraphrased duplicates or omitted risks used to fit a case cap. If creation "
+                           "business_analysis is supplied, preserve every applicable scenario ID and its frozen detail "
+                           "in both development and acceptance suites; missing coverage blocks approval. "
                            + HELPER_EXECUTION_AUDIT + " "
                            + CONVERSATIONAL_JSON_AUDIT + " " + INPUT_BOUNDARY_AUDIT,
                            {"context": context, "plan": plan, "control_results": control_results,
@@ -639,10 +675,40 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
         raise RefinerError("The safe planning wave supports agent_parallelism 1 or 2")
     if agent_parallelism == 1:
         if wave_callback:
-            wave_callback("serial", reason="agent_parallelism=1")
-        plan = make_plan(agent, context, work, max_cases, max_attempts=max_attempts,
-                         phase_callback=phase_callback, suite="development")
-        return plan, make_acceptance(plan)
+            wave_callback("serial", **parallel_agent_plan(1))
+        development_status, acceptance_status = "not_started", "not_started"
+        try:
+            if wave_callback:
+                wave_callback("task_started", task_id="AG-DEV-REVIEW", task_status="running")
+            plan = make_plan(agent, context, work, max_cases, max_attempts=max_attempts,
+                             phase_callback=phase_callback, suite="development")
+            development_status = "passed"
+            if wave_callback:
+                wave_callback("task_finished", task_id="AG-DEV-REVIEW", task_status="passed")
+                wave_callback("task_started", task_id="AG-ACCEPTANCE-PLAN", task_status="running")
+            acceptance = make_acceptance(plan)
+            acceptance_status = "passed"
+            if wave_callback:
+                wave_callback("task_finished", task_id="AG-ACCEPTANCE-PLAN", task_status="passed")
+        except Exception as exc:
+            if development_status == "passed":
+                acceptance_status = "failed"
+            else:
+                development_status = "failed"
+            if wave_callback:
+                wave_callback("failed", task_results=[
+                    {"id": "AG-DEV-REVIEW", "status": development_status,
+                     **({"error": str(exc)} if development_status == "failed" else {})},
+                    {"id": "AG-ACCEPTANCE-PLAN", "status": acceptance_status,
+                     **({"error": str(exc)} if acceptance_status == "failed" else {})},
+                ], error=str(exc))
+            raise
+        if wave_callback:
+            wave_callback("passed", task_results=[
+                {"id": "AG-DEV-REVIEW", "status": "passed"},
+                {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"},
+            ], development_status="passed", acceptance_status="passed")
+        return plan, acceptance
     acceptance_future = None
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="skill-refiner-plan") as pool:
         def start_acceptance(plan):
@@ -650,14 +716,15 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
             if acceptance_future is not None:
                 return
             if wave_callback:
-                wave_callback("running", tasks=["development independent review", "acceptance plan generation, self-check and review"],
-                              dependency="development plan passed complete local controls; requirement contract is frozen")
+                wave_callback("running", **parallel_agent_plan(2))
             acceptance_future = pool.submit(make_acceptance, plan)
 
         try:
             plan = make_plan(agent, context, work, max_cases, max_attempts=max_attempts,
                              phase_callback=phase_callback, suite="development",
                              on_self_check_passed=start_acceptance)
+            if wave_callback and acceptance_future is not None:
+                wave_callback("task_finished", task_id="AG-DEV-REVIEW", task_status="passed")
         except Exception as exc:
             peer_error = None
             if acceptance_future is not None:
@@ -667,7 +734,13 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
                     peer_error = other
             if wave_callback and acceptance_future is not None:
                 wave_callback("failed", error=str(peer_error or exc),
-                              development_error=str(exc), acceptance_error=str(peer_error) if peer_error else None)
+                              development_error=str(exc), acceptance_error=str(peer_error) if peer_error else None,
+                              task_results=[
+                                  {"id": "AG-DEV-REVIEW", "status": "failed", "error": str(exc)},
+                                  {"id": "AG-ACCEPTANCE-PLAN",
+                                   "status": "failed" if peer_error else "passed",
+                                   **({"error": str(peer_error)} if peer_error else {})},
+                              ])
             if peer_error and not isinstance(exc, Cancelled):
                 raise PlanGateError(f"Development planning failed: {exc}; concurrent acceptance planning also failed: {peer_error}") from exc
             raise
@@ -676,12 +749,18 @@ def make_plan_suites(agent, context, work, max_cases, acceptance_cases, *, max_a
         else:
             try:
                 acceptance = acceptance_future.result()
+                if wave_callback:
+                    wave_callback("task_finished", task_id="AG-ACCEPTANCE-PLAN", task_status="passed")
             except Exception as exc:
                 if wave_callback:
-                    wave_callback("failed", error=str(exc), development_status="passed", acceptance_status="failed")
+                    wave_callback("failed", error=str(exc), development_status="passed", acceptance_status="failed",
+                                  task_results=[{"id": "AG-DEV-REVIEW", "status": "passed"},
+                                                {"id": "AG-ACCEPTANCE-PLAN", "status": "failed", "error": str(exc)}])
                 raise
     if wave_callback and agent_parallelism == 2:
-        wave_callback("passed", development_status="passed", acceptance_status="passed")
+        wave_callback("passed", development_status="passed", acceptance_status="passed",
+                      task_results=[{"id": "AG-DEV-REVIEW", "status": "passed"},
+                                    {"id": "AG-ACCEPTANCE-PLAN", "status": "passed"}])
     return plan, acceptance
 
 
@@ -692,6 +771,7 @@ def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback
 
     phase("running", case_ids=[case["id"] for case in plan["cases"]])
     try:
+        review_schema = PLAN_REVIEW_V2 if plan.get("schema_version") == "skill-refiner.plan/v2" else PLAN_REVIEW
         review = agent.ask("plan-review",
                            "Independently review this already-frozen Skill test plan against the source "
                            "requirements, scenarios, expected outcomes, assets, response assertions and "
@@ -703,9 +783,12 @@ def _review_frozen_plan(agent, plan, context, control_results, *, phase_callback
                            "available assets are supported by the original inventory or declared fixtures. "
                            "Do not narrow checks to a single wording when equivalent phrases meet the contract. "
                            "Return exactly the supplied PLAN_REVIEW JSON schema. Cite case and assertion IDs "
-                           "in each issue. Approve only if all flags are true and the complete plan is useful.",
+                           "in each issue. For v3 cases assess atomic-criterion traceability, concrete scenario "
+                           "detail and workflow-specific risk coverage. Verify preconditions, stimulus, ordered "
+                           "actions, observable expected results and forbidden outcomes; reject broad, duplicated "
+                           "or paraphrased scenarios. Approve only if all flags are true and the complete plan is useful.",
                            {"context": context, "plan": plan, "control_results": control_results,
-                            "previous_case_ids": [case["id"] for case in plan["cases"]]}, PLAN_REVIEW)
+                            "previous_case_ids": [case["id"] for case in plan["cases"]]}, review_schema)
         _persist_plan_review(agent.work, suite, 1, plan, review)
         validate_plan_review(review, plan)
     except RefinerError as exc:
@@ -1244,12 +1327,31 @@ def run(args):
             waves = state.setdefault("planning_waves", [])
             if status == "running":
                 record = {"sequence": len(waves) + 1, "status": "running",
-                          "started_at": datetime.now(timezone.utc).isoformat(), **data}
+                          "started_at": datetime.now(timezone.utc).isoformat(),
+                          "task_results": [{"id": task["id"], "status": "running"}
+                                           for task in data.get("tasks", [])], **data}
                 waves.append(record)
             elif status == "serial":
-                waves.append({"sequence": len(waves) + 1, "status": "serial", **data})
+                waves.append({"sequence": len(waves) + 1, "status": "serial",
+                              "task_results": [{"id": task["id"], "status": "pending"}
+                                               for task in data.get("tasks", [])], **data})
+            elif status in {"task_started", "task_finished"}:
+                record = next((item for item in reversed(waves)
+                               if item.get("status") in {"running", "serial"}), None)
+                if record:
+                    task_id = data["task_id"]
+                    task_status = data["task_status"]
+                    result = next((item for item in record.setdefault("task_results", [])
+                                   if item.get("id") == task_id), None)
+                    if result is None:
+                        result = {"id": task_id}
+                        record["task_results"].append(result)
+                    result.update(status=task_status,
+                                  **{key: value for key, value in data.items()
+                                     if key not in {"task_id", "task_status"}})
             else:
-                record = next((item for item in reversed(waves) if item.get("status") == "running"), None)
+                record = next((item for item in reversed(waves)
+                               if item.get("status") in {"running", "serial"}), None)
                 if record:
                     record.update(status=status, completed_at=datetime.now(timezone.utc).isoformat(), **data)
             state["elapsed_seconds"] = round(elapsed_before + time.monotonic() - started, 2)
@@ -1359,7 +1461,17 @@ def run(args):
                                source_run=str(previous), case_ids=[case["id"] for case in frozen["cases"]])
                 phase_progress("plan_self_check", "running", suite=suite, reused=True)
                 try:
-                    controls = validate_plan(frozen, work, limit)
+                    business_analysis = context.get("business_analysis") or {}
+                    source_scenarios = business_analysis.get("scenarios") or None
+                    required_scenario_ids = context.get("required_scenario_ids")
+                    if required_scenario_ids is None and source_scenarios:
+                        required_scenario_ids = [row["id"] for row in source_scenarios if row["applicable"]]
+                    controls = validate_plan(
+                        frozen, work, limit,
+                        required_case_kinds=context.get("required_case_kinds", []),
+                        required_scenario_ids=required_scenario_ids or [],
+                        expected_scenarios=source_scenarios,
+                        expected_requirements=context.get("contract"))
                 except PlanValidationError as exc:
                     failed_evidence = {**exc.evidence, "suite": suite, "attempt": 1,
                                        "plan_sha256": digest(frozen), "plan_snapshot": frozen}

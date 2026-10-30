@@ -104,8 +104,8 @@ python3 /absolute/path/to/skill-refiner/scripts/launch.py run /absolute/path/to/
 ```
 
 Read `work-plan.md` from the emitted workspace path. Show the design outline,
-requirement IDs, acceptance criteria, frozen per-case checklist and explicit limits
-before execution. Continue the same workspace with `run TARGET --resume-from RUN
+requirement IDs, acceptance criteria, dependency-aware Agent work plan, frozen per-case
+checklist and explicit limits before execution. Continue the same workspace with `run TARGET --resume-from RUN
 --config FILE` after presenting the plan; wait only when it reveals a material
 business question. `--plan-only` exits with `status=planned`, which is not a passing
 run. The plan is a frozen design artifact; it does not track execution status.
@@ -181,11 +181,27 @@ it as a pass. Do not start a new stage after the run budget expires or extend it
 automatically. On resume, reuse completed evidence and retry only incomplete work under
 the validated contract.
 Case-executor timeout remains a separate per-evaluation failure limit.
-Controller planning defaults to at most two concurrent Agent calls in one verified
-wave: development-plan review overlaps acceptance-plan generation after the requirement
-contract passes local controls. Set `--agent-parallelism 1` to serialize that wave.
-Both branches must finish and pass before the plan gate; same-executor skill-up cases
-remain serialized because their judge uses shared temporary directories.
+Controller planning defaults to at most two concurrent Agent calls in a verified wave:
+`AG-DEV-REVIEW` reviews the frozen development plan while `AG-ACCEPTANCE-PLAN` creates,
+self-checks and reviews the independent acceptance plan. Both depend on the development
+plan and its complete local controls; they use separate evidence scopes, and the main
+controller joins and verifies both before opening the plan gate. `--agent-parallelism 1`
+serializes the same work and records that the configured cap caused serialization.
+Same-executor skill-up cases remain serialized because their judge uses shared temporary
+directories.
+
+For the broader Skill development/refinement workload, make a dependency DAG before
+delegating. Split source audits by disjoint read-only file groups and scenario or fixture
+design by non-overlapping requirement/criterion IDs only after the requirement contract
+is frozen. Each task names its ID, agent role, goal/requirement refs, prerequisites,
+input hashes, exclusive output/file scope, evidence path, `done_when`, merge owner and
+join gate. Keep cross-requirement interactions, shared-file edits and final synthesis
+with the main Agent. Dispatch only ready tasks whose write scopes do not overlap, within
+the configured concurrency limit; gather every started task's terminal status before
+merging. Persist task events/evidence in the run workspace and expose progress through
+the parent GoalExecutor when it owns cross-turn tracking. If the host does not expose
+subagent scheduling, record the candidate task graph and the capability limit, then use
+the controller wave above; never report an unstarted delegation as parallel execution.
 
 After it exits, invoke the `verify` command on that run directory. Only a successful machine-readable
 `status=verified` permits you to describe the candidate as complete. A failed or
@@ -270,6 +286,10 @@ preserved; only `created` means creation passed all gates. Use
 
 - Required behaviors map to executable cases. Read referenced resources and actual
   scripts; a description alone is insufficient for comprehensive planning.
+- Split material requirements into atomic, source-linked acceptance criteria with
+  observable evidence. Build a detailed, risk-driven scenario inventory before cases;
+  each applicable scenario maps to a development case and fresh acceptance case, and
+  unsupported exclusions or case-budget gaps keep the plan gate closed.
 - The planner reads the versioned JSON schema before generation. Each frozen case
   includes its complete scenario/expected-result contract, `helpers` array, source and
   asset audit, stable assertion IDs, paraphrase positives and targeted negatives.

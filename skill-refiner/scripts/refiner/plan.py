@@ -38,6 +38,9 @@ def _requirement_detail(requirement_ids, requirements):
         row = by_id.get(rid)
         if row:
             lines.append(f"  - **{rid}:** {_md(row['behavior'])} (source: {_md(row.get('source', ''))})")
+            for criterion in row.get("acceptance_criteria", []):
+                lines.append(f"    - **{criterion['id']}:** {_md(criterion['statement'])} "
+                             f"Evidence: {_md(criterion['evidence'])}")
         else:
             lines.append(f"  - **{rid}:** unknown requirement")
     return lines
@@ -45,10 +48,22 @@ def _requirement_detail(requirement_ids, requirements):
 
 def _render_case_block(case, requirements):
     lines = [f"- [ ] **{case['id']} ({case['kind']})**",
+             f"  - Scenario ID: {_md(case.get('scenario_id', 'legacy'))}",
              f"  - Scenario: {_md(case.get('scenario', ''))}",
              f"  - Expected outcome: {_md(case.get('expected_outcome', ''))}",
+             f"  - Acceptance criterion IDs: {_md(', '.join(case.get('acceptance_criteria_ids', [])) or 'legacy/unavailable')}",
              "  - Linked requirements:"]
     lines.extend(_requirement_detail(case["requirement_ids"], requirements))
+    detail = case.get("scenario_detail")
+    if detail:
+        lines += ["  - Scenario detail:",
+                  f"    - Preconditions: {_md('; '.join(detail['preconditions']))}",
+                  f"    - Stimulus: {_md(detail['stimulus'])}",
+                  f"    - Actions: {_md('; '.join(detail['actions']))}",
+                  f"    - Expected observables: {_md('; '.join(detail['expected_observables']))}",
+                  f"    - Forbidden outcomes: {_md('; '.join(detail['forbidden_outcomes']))}",
+                  f"    - Risk dimensions: {_md(', '.join(detail['risk_dimensions']))}",
+                  f"    - Basis: {_md(detail['basis'])}"]
     lines.append("  - Machine checks:")
     for check in case.get("checks", []):
         lines.append(f"    - {_md(_format_check_line(check))}")
@@ -201,23 +216,71 @@ def _execution_phases(analysis):
     return phases
 
 
+def parallel_agent_plan(agent_parallelism=2):
+    """Return the bounded controller-Agent work DAG used by planning."""
+    tasks = [
+        {
+            "id": "AG-DEV-REVIEW",
+            "role": "independent review of the frozen development plan",
+            "depends_on": ["development plan generated and all local controls passed"],
+            "inputs": ["test-plan.json", "plan-controls/development.json", "frozen requirements/source refs"],
+            "outputs": ["plan-reviews/development.json", "plan-reviews/attempts/development-01.json", "agent-calls/*-plan-review"],
+            "write_scope": ["plan-reviews/development*", "agent-calls/*-plan-review"],
+        },
+        {
+            "id": "AG-ACCEPTANCE-PLAN",
+            "role": "generate, self-check and independently review the fresh acceptance plan",
+            "depends_on": ["development plan generated and all local controls passed"],
+            "inputs": ["frozen requirement contract", "target source/business analysis", "acceptance limits"],
+            "outputs": ["acceptance-plan.json", "plan-controls/acceptance.json", "plan-reviews/acceptance.json", "agent-calls/*-acceptance-plan"],
+            "write_scope": ["acceptance-plan.json", "plan-controls/acceptance*", "plan-reviews/acceptance*", "agent-calls/*-acceptance-plan"],
+        },
+    ]
+    parallel = agent_parallelism == 2
+    return {
+        "wave_id": "PW-PLAN-01",
+        "schedule": "parallel" if parallel else "serial",
+        "max_parallel_agents": agent_parallelism,
+        "tasks": tasks,
+        "starts_when": "development plan is frozen and its complete local control set passes",
+        "join_gate": "both task IDs finish successfully; controller checks frozen requirement/hash consistency and then opens the plan gate",
+        "merge_owner": "main controller",
+        "serial_reason": None if parallel else "--agent-parallelism=1; the tasks are logically independent but the configured concurrency cap is one",
+        "failure_behavior": "join every started task, persist per-task terminal status/error, and keep plan_gate=not_passed",
+    }
+
+
 def _execution_phase_markdown(analysis, agent_parallelism=2):
+    work = parallel_agent_plan(agent_parallelism)
     lines = [
         "## Execution phases and step conclusions", "",
         "This is the ordered execution map. Each step must end with its stated conclusion and evidence before dependent work advances.", "",
-        "### Bounded Agent concurrency", "",
+        "### Bounded Agent concurrency and dependency-aware work plan", "",
+        f"- Wave: `{work['wave_id']}`; schedule: **{work['schedule']}**; maximum concurrent Agent tasks: {work['max_parallel_agents']}.",
+        f"- Starts when: {_md(work['starts_when'])}.",
     ]
-    if agent_parallelism == 2:
+    for task in work["tasks"]:
         lines += [
-            "After the development plan passes its complete local controls and freezes the requirement contract, the development plan's independent review overlaps with acceptance-plan generation, self-check and review. Both branches must finish successfully before the plan gate can pass.",
-            "Each branch has its own call artifacts and status. A failure in either branch is recorded, all started work is joined, and the plan gate remains closed.",
-        ]
-    else:
-        lines += [
-            "Controller Agent planning runs sequentially because --agent-parallelism is 1. The same dependency order and plan gate apply.",
+            f"- **{task['id']} — {task['role']}**",
+            f"  - Depends on: {_md('; '.join(task['depends_on']))}.",
+            f"  - Reads: {_md('; '.join(task['inputs']))}.",
+            f"  - Writes: {_md('; '.join(task['outputs']))}.",
+            f"  - Isolated scope: {_md('; '.join(task['write_scope']))}.",
         ]
     lines += [
+        f"- Merge owner: {work['merge_owner']}; join gate: {_md(work['join_gate'])}.",
+        f"- Failure handling: {_md(work['failure_behavior'])}.",
+    ]
+    if work["serial_reason"]:
+        lines.append(f"- Serial reason: {_md(work['serial_reason'])}.")
+    else:
+        lines.append("- The two listed tasks run concurrently because they share only the frozen contract and write to disjoint evidence scopes.")
+    lines += [
+        "- Scope: this is the controller runtime's verified Agent wave. Any additional host-subagent work must have its own task IDs, dependencies, disjoint file/data scopes, output paths and merge gate; do not imply that an unstarted host task ran.",
+        "- Other dependent phases remain serial: analysis must pass review before drafting; plan gate before target evaluation; repair before full regression; regression before acceptance; all evidence before final verify.",
         "Cases within one skill-up executor remain sequential because the pinned judge uses shared temporary directories; no case-level parallelism is enabled by this Agent setting.", "",
+    ]
+    lines += [
         "### Autonomous progression", "",
         "Unless the user explicitly asks for plan-only, showing this plan is a visibility checkpoint, not an approval wait. Continue the same run through implementation, tests, repair and verification. Pause only for a material unanswered business decision, a required permission or local action, an explicit user stop, a failed gate, an environment blocker, or an exhausted configured budget.", "",
         "At each meaningful transition, report the step number and name, live status, one-sentence conclusion, evidence path and next step. Read live status from structured events, state.json and stages.json; never infer completion from a static plan, elapsed time or heartbeat count.", "",
@@ -286,12 +349,20 @@ def write_work_plan(work, *, source=None, plan=None, acceptance=None, analysis=N
     else:
         lines.append("Requirements have not been frozen yet.")
     if analysis:
-        lines += ["", "## Scenario coverage intent", ""]
+        lines += ["", "## Detailed scenario matrix", ""]
         for item in analysis.get("scenarios", []):
             applicability = "included" if item["applicable"] else "excluded"
-            lines.append(f"- **{item['kind']} — {applicability}:** {_md(item['situation'])} "
-                         f"Expected: {_md(item['expected_behavior'])} "
-                         f"(requirements: {', '.join(item['requirement_ids'])})")
+            detail = item["detail"]
+            lines += [f"- **{item['id']} / {item['kind']} — {applicability}:** {_md(item['situation'])}",
+                      f"  - Requirements: {', '.join(item['requirement_ids'])}; criteria: "
+                      f"{', '.join(item['acceptance_criteria_ids'])}",
+                      f"  - Preconditions: {_md('; '.join(detail['preconditions']))}",
+                      f"  - Stimulus and actions: {_md(detail['stimulus'])}; {_md('; '.join(detail['actions']))}",
+                      f"  - Expected: {_md('; '.join(detail['expected_observables']))}",
+                      f"  - Forbidden: {_md('; '.join(detail['forbidden_outcomes']))}",
+                      f"  - Risk dimensions: {_md(', '.join(detail['risk_dimensions']))}; basis: {_md(item['basis'])}"]
+            if not item["applicable"]:
+                lines.append(f"  - Exclusion reason: {_md(item['exclusion_reason'])}")
     if analysis and analysis.get("assumptions"):
         lines += ["", "## Assumptions", ""] + [f"- {_md(x)}" for x in analysis["assumptions"]]
     if analysis and analysis.get("external_dependencies"):
@@ -340,6 +411,8 @@ def _suite_case_markdown(phase, suite):
             req_lines.append(
                 f"- {rid}: {row.get('behavior', 'unknown')} (source: {row.get('source', '')})"
             )
+            req_lines.extend(f"  - {criterion['id']}: {criterion['statement']} Evidence: {criterion['evidence']}"
+                             for criterion in row.get("acceptance_criteria", []))
         check_lines = ["- " + _format_check_line(check) for check in case["checks"]]
         audit = case.get("asset_audit", {})
         positive = [f"- {item.get('id')}: {item.get('response', '')}"
@@ -347,11 +420,22 @@ def _suite_case_markdown(phase, suite):
         negative = [f"- {item.get('id')} targets {item.get('assertion_id')}: {item.get('response', '')}; "
                     f"rationale: {item.get('rationale', '')}"
                     for item in case.get("negative_controls", [])]
+        detail = case.get("scenario_detail", {})
         lines += [
             f"### {case['id']} ({case['kind']})", "",
+            f"Scenario ID: {case.get('scenario_id', 'legacy')}",
             f"Scenario: {case.get('scenario', '')}",
             f"Expected outcome: {case.get('expected_outcome', '')}",
+            f"Acceptance criterion IDs: {', '.join(case.get('acceptance_criteria_ids', [])) or 'legacy/unavailable'}",
             "Linked requirements:", *req_lines,
+            "Structured scenario detail:",
+            f"- Preconditions: {'; '.join(detail.get('preconditions', [])) or 'legacy/unavailable'}",
+            f"- Stimulus: {detail.get('stimulus', 'legacy/unavailable')}",
+            f"- Actions: {'; '.join(detail.get('actions', [])) or 'legacy/unavailable'}",
+            f"- Expected observables: {'; '.join(detail.get('expected_observables', [])) or 'legacy/unavailable'}",
+            f"- Forbidden outcomes: {'; '.join(detail.get('forbidden_outcomes', [])) or 'legacy/unavailable'}",
+            f"- Risk dimensions: {', '.join(detail.get('risk_dimensions', [])) or 'legacy/unavailable'}",
+            f"- Scenario basis: {detail.get('basis', 'legacy/unavailable')}",
             "Machine checks:", *check_lines,
             "Asset audit:",
             f"- Status: {audit.get('status', 'missing')}",

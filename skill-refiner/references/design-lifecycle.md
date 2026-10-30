@@ -99,7 +99,32 @@ status must come from persisted phase state and structured events.
 Map every required behavior to at least one executable check. Plan concrete normal,
 boundary, and error cases where applicable, including configuration and help-request
 paths when they affect behavior. Define observable inputs, expected outputs, and
-independent checks. Keep the source requirements and test plan frozen before repair.
+independent checks. Split each material requirement into atomic acceptance criteria:
+one observable outcome per criterion, a stable ID, a source link, and the evidence that
+would prove it. Do not let one broad requirement row hide separate decisions, permissions,
+outputs or side effects.
+
+Build a scenario inventory before freezing executable cases. Give each scenario a stable
+ID, linked requirement and criterion IDs, preconditions, concrete stimulus, ordered
+actions, observable expected outcomes, forbidden outcomes, relevant risk dimensions and
+a source-based rationale. Consider distinct inputs, actors and permissions, workflow
+states, dependency failures, cross-requirement interactions, side effects, retries,
+idempotency, interruption and recovery when they apply. Use separate scenarios when the
+correct result or evidence changes; paraphrases and cosmetic fixture changes do not add
+coverage. Assess normal, boundary and error applicability, and explain exclusions from
+the scope. Map every applicable scenario to a distinct executable case in development
+and in the fresh acceptance suite. If configured case or evaluation limits cannot fit
+the justified matrix, report the exact uncovered criteria/scenarios and keep the plan
+gate closed; do not compress them into vague catch-all cases.
+
+Before execution, also turn the work itself into a dependency-aware Agent task graph. Give each task a stable ID, role, requirement references, prerequisites, input hashes, exclusive read/write scope, output/evidence path, completion check, merge owner and join gate. A task can enter a parallel wave only after its prerequisites pass and its write scope is disjoint from every other running task.
+
+Good candidates include read-only source audits over separate file groups, scenario drafting over non-overlapping requirement clusters after the requirement contract is frozen, and independent plan review beside acceptance-plan generation. Keep shared contract decisions, cross-requirement interaction coverage, shared-file edits, repair/regression dependencies and unisolated executors serial. Limit concurrency to configured host/controller capacity; record every started branch terminal status and merge only after all required branches finish. If the host cannot dispatch subagents, state that capability limit and keep the documented controller Agent wave as the only claimed parallel execution.
+
+For each executable case, include its scenario ID, concrete setup, inputs, steps,
+expected observable results, forbidden outcomes, fixtures/assets, and independent
+assertions. A reviewer checks both the trace links and whether the scenario actually
+distinguishes the behavior it claims to test. Keep the source requirements and test plan frozen before repair.
 Before running the target, render and show a concise work plan with the design outline,
 stable requirement IDs, acceptance criteria, case IDs/types, what each case checks,
 and the total time/round/evaluation limits. Save the complete plan and checklist in the

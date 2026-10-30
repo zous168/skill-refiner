@@ -379,11 +379,13 @@ def grade(case, response, root):
     return {"case_id": case["id"], "passed": all(a["passed"] for a in assertions), "assertions": assertions}
 
 
-def validate_plan(plan, root, max_cases=8):
+def validate_plan(plan, root, max_cases=8, *, required_case_kinds=None,
+                  required_scenario_ids=None, expected_scenarios=None, expected_requirements=None):
     """Validate real coverage, oracle paths and discriminating output assertions."""
-    from .schemas import PLAN
+    from .schemas import PLAN, PLAN_V2
     import jsonschema
-    jsonschema.validate(plan, PLAN)
+    legacy = plan.get("schema_version") == "skill-refiner.plan/v2"
+    jsonschema.validate(plan, PLAN_V2 if legacy else PLAN)
     if len(plan["cases"]) > max_cases:
         raise RefinerError(f"Plan exceeds {max_cases} cases")
     # Exact status/state labels are especially easy to invent when an agent
@@ -421,7 +423,21 @@ def validate_plan(plan, root, max_cases=8):
     requirements = {r["id"]: r for r in plan["requirements"]}
     if len(requirements) != len(plan["requirements"]):
         raise RefinerError("Duplicate requirement IDs")
-    covered, ids, control_evidence, control_failures, asset_audit_failures = set(), set(), [], [], []
+    criteria_by_requirement = ({req_id: {item["id"] for item in row["acceptance_criteria"]}
+                                for req_id, row in requirements.items()} if not legacy else {})
+    criterion_list = [item["id"] for row in requirements.values()
+                      for item in row.get("acceptance_criteria", [])]
+    if not legacy and len(criterion_list) != len(set(criterion_list)):
+        raise RefinerError("Duplicate acceptance criterion IDs")
+    criterion_to_requirement = {criterion_id: req_id for req_id, values in criteria_by_requirement.items()
+                                for criterion_id in values}
+    covered, covered_criteria, ids = set(), set(), set()
+    control_evidence, control_failures, asset_audit_failures = [], [], []
+    scenario_failures, scenario_ids, scenario_signatures = [], set(), set()
+    if not legacy and expected_requirements is not None and plan["requirements"] != expected_requirements:
+        scenario_failures.append({"field_path": "requirements",
+                                  "expected_condition": "exactly preserve the frozen source requirement contract",
+                                  "actual_value": plan["requirements"]})
     for case in plan["cases"]:
         if case["id"] in ids:
             raise RefinerError(f"Duplicate case ID: {case['id']}")
@@ -435,6 +451,38 @@ def validate_plan(plan, root, max_cases=8):
         if not set(case["requirement_ids"]) <= requirements.keys():
             raise RefinerError(f"Unknown requirement reference: {case['id']}")
         covered.update(case["requirement_ids"])
+        if not legacy:
+            case_criteria = set(case["acceptance_criteria_ids"])
+            unknown_criteria = sorted(case_criteria - criterion_to_requirement.keys())
+            wrong_requirement_links = sorted(criterion_id for criterion_id in case_criteria
+                                             if criterion_id in criterion_to_requirement
+                                             and criterion_to_requirement[criterion_id] not in case["requirement_ids"])
+            criteria_requirements = {criterion_to_requirement[criterion_id] for criterion_id in case_criteria
+                                     if criterion_id in criterion_to_requirement}
+            if unknown_criteria or wrong_requirement_links or criteria_requirements != set(case["requirement_ids"]):
+                scenario_failures.append({"case_id": case["id"], "field_path": "acceptance_criteria_ids",
+                                          "expected_condition": "known atomic criteria whose parent requirement IDs equal requirement_ids",
+                                          "actual_value": {"criterion_ids": sorted(case_criteria),
+                                                           "unknown": unknown_criteria,
+                                                           "criteria_for_other_requirements": wrong_requirement_links,
+                                                           "criterion_parent_requirements": sorted(criteria_requirements),
+                                                           "requirement_ids": sorted(case["requirement_ids"])}})
+            covered_criteria.update(case_criteria)
+            scenario_id = case["scenario_id"]
+            if scenario_id in scenario_ids:
+                scenario_failures.append({"case_id": case["id"], "field_path": "scenario_id",
+                                          "expected_condition": "a unique concrete scenario ID per executable case",
+                                          "actual_value": scenario_id})
+            scenario_ids.add(scenario_id)
+            detail = case["scenario_detail"]
+            signature = json.dumps({key: detail[key] for key in
+                                    ("title", "preconditions", "stimulus", "actions", "risk_dimensions")},
+                                   ensure_ascii=False, sort_keys=True).casefold()
+            if signature in scenario_signatures:
+                scenario_failures.append({"case_id": case["id"], "field_path": "scenario_detail",
+                                          "expected_condition": "a meaningfully distinct scenario, not a paraphrase or duplicate",
+                                          "actual_value": {"scenario_id": scenario_id, "signature": signature}})
+            scenario_signatures.add(signature)
         linked_sources = {requirements[item]["source"] for item in case["requirement_ids"]}
         audit = case["asset_audit"]
         required_assets = set(audit["required_paths"])
@@ -754,10 +802,56 @@ def validate_plan(plan, root, max_cases=8):
         coverage_failures.append({"field_path": "requirements[].case_coverage",
                                   "expected_condition": "every required requirement maps to a case",
                                   "actual_value": {"uncovered_requirement_ids": uncovered}})
-    if "normal" not in kinds or not kinds & {"boundary", "error", "negative"}:
+    if (not required_case_kinds and
+            ("normal" not in kinds or not kinds & {"boundary", "error", "negative"})):
         coverage_failures.append({"field_path": "cases[].kind",
                                   "expected_condition": "normal plus boundary/error/negative scenarios",
                                   "actual_value": sorted(kinds)})
+    if not legacy:
+        required_criteria = {criterion_id for req_id, criterion_ids in criteria_by_requirement.items()
+                             if requirements[req_id]["required"] for criterion_id in criterion_ids}
+        uncovered_criteria = sorted(required_criteria - covered_criteria)
+        if uncovered_criteria:
+            coverage_failures.append({"field_path": "requirements[].acceptance_criteria[].case_coverage",
+                                      "expected_condition": "each required atomic acceptance criterion maps to at least one case",
+                                      "actual_value": {"uncovered_criterion_ids": uncovered_criteria}})
+        missing_kinds = sorted(set(required_case_kinds or []) - kinds)
+        if missing_kinds:
+            coverage_failures.append({"field_path": "cases[].kind",
+                                      "expected_condition": "cover every explicitly applicable scenario category",
+                                      "actual_value": {"missing_kinds": missing_kinds, "present_kinds": sorted(kinds)}})
+        required_scenario_ids = set(required_scenario_ids or [])
+        missing_scenarios = sorted(required_scenario_ids - scenario_ids)
+        if missing_scenarios:
+            coverage_failures.append({"field_path": "cases[].scenario_id",
+                                      "expected_condition": "cover every applicable frozen scenario ID",
+                                      "actual_value": {"missing_scenario_ids": missing_scenarios}})
+        if expected_scenarios is not None:
+            source_by_id = {row["id"]: row for row in expected_scenarios}
+            for case in plan["cases"]:
+                source = source_by_id.get(case["scenario_id"])
+                if source is None or not source["applicable"]:
+                    scenario_failures.append({"case_id": case["id"], "field_path": "scenario_id",
+                                              "expected_condition": "an applicable scenario in the frozen business analysis",
+                                              "actual_value": case["scenario_id"]})
+                    continue
+                if (case["kind"] != source["kind"]
+                        or case["requirement_ids"] != source["requirement_ids"]
+                        or case["acceptance_criteria_ids"] != source["acceptance_criteria_ids"]
+                        or case["scenario"].strip() != source["situation"].strip()
+                        or any(case["scenario_detail"][key] != source["detail"][key]
+                               for key in ("title", "expected_observables", "forbidden_outcomes",
+                                           "risk_dimensions", "basis"))):
+                    scenario_failures.append({"case_id": case["id"], "field_path": "scenario_detail",
+                                              "expected_condition": "preserve the frozen scenario ID, trace, expected outcomes, forbidden outcomes and risk dimensions; use fresh concrete stimuli",
+                                              "actual_value": {"scenario_id": case["scenario_id"],
+                                                               "source_scenario_id": source["id"]}})
+            unknown_source_ids = sorted(scenario_ids - set(source_by_id))
+            if unknown_source_ids:
+                coverage_failures.append({"field_path": "cases[].scenario_id",
+                                          "expected_condition": "only scenario IDs from the frozen analysis",
+                                          "actual_value": {"unknown_scenario_ids": unknown_source_ids}})
+    coverage_failures.extend(scenario_failures)
     evidence = {"schema_version": "skill-refiner.plan-controls/v1",
                 "status": "failed" if control_failures else "invalid_coverage" if coverage_failures else "passed",
                 "case_control_results": control_evidence, "control_failures": control_failures,

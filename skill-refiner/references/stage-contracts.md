@@ -49,12 +49,16 @@ so slow-drip HTTP responses are also bounded. Timeout/cancellation evidence is s
 and the phase becomes an error rather than a pass. Completed stages remain reusable;
 resume retries only incomplete work under the validated run contract. Per-case executor
 timeouts and round/evaluation limits also bound target testing. When the development
-plan has passed local controls, its independent review overlaps acceptance-plan
-generation under `--agent-parallelism 2`; the gate waits for both. `--agent-parallelism=1`
-selects the sequential fallback. Same-executor skill-up cases remain serialized
-because the judge uses shared temporary directories. When
-`large-task-tracking` owns the task, its parent snapshot/runtime is the sole user-visible
-progress record; it reads these internal files and events without copying long logs.
+plan has passed local controls, dependency-aware wave `PW-PLAN-01` runs `AG-DEV-REVIEW`
+beside `AG-ACCEPTANCE-PLAN` under `--agent-parallelism 2`. The work plan and each
+`planning_waves[]` record identify task roles, prerequisites, inputs, outputs, isolated
+write scopes, merge owner and join gate. Wave records retain per-task terminal status
+and errors; the controller joins all started branches before deciding the plan gate.
+`--agent-parallelism=1` runs the same independent tasks in sequence and records the
+configured serial reason. Same-executor skill-up cases remain serialized because the
+judge uses shared temporary directories. When `large-task-tracking` owns the task, its
+parent snapshot/runtime is the sole user-visible progress record; it reads these internal
+files and events without copying long logs.
 Final verification remains bound to stage artifacts and hashes.
 
 Creation runs use `create --resume-run RUN_DIRECTORY` to continue the same workspace.
@@ -65,7 +69,8 @@ different contract or changed completed artifact is rejected; higher time, call,
 evaluation, planning or round budgets can be supplied when continuing.
 
 The human-readable `work-plan.md` presents the design/requirement map, acceptance
-criteria and frozen case checklist before execution. Each case shows its scenario,
+criteria, dependency-aware Agent task graph and frozen case checklist before execution.
+Each case shows its scenario,
 expected outcome, linked requirement sources, machine checks and expected values,
 and oracle rationale. `test-scenarios.md` contains the corresponding executable
 development and acceptance scenario inventory. These files have no live statuses
@@ -114,6 +119,13 @@ For business workflow analysis, each user-facing workflow step also has an obser
 completion_check. Render it beside the step's inputs, outputs, failure behavior and
 requirement links so a reader can tell what success means.
 
+Show the executable controller Agent DAG with stable task IDs, roles, prerequisites, inputs,
+output artifacts, write scopes, concurrency limit, merge owner and join gate. For any host-
+subagent tasks, include their own `done_when` and evidence path. Label each task as planned,
+running or terminal in persisted state; explain why dependent or shared-scope tasks remain
+serial. Never describe a candidate graph as a running task or treat one completed branch as
+a passed wave.
+
 Presenting the plan is a visibility checkpoint, not routine approval. Unless the user
 explicitly requests plan-only, proceed autonomously in the same run. Pause for a
 material unanswered decision, required permission/local action, explicit user stop,
@@ -139,7 +151,7 @@ displayed as running.
 | Creation: inputs | User description, supplied requirements, auto-discovered project standards, and optional additional standards | `inputs.json` (JSON), `inputs/*.md` (UTF-8 Markdown/text) | Inputs frozen and hashed in the business contract |
 | Creation: analysis | Frozen business inputs | `analysis.json`, `analysis-review.json` (JSON), `business-analysis.md` (Markdown), `business.lock.json` (JSON) | Requirements cite user sources; workflow and normal/boundary/error applicability reviewed; material questions pause creation |
 | Creation: first draft | Approved analysis and business lock | `drafts/` (Skill source files), `draft-manifest.json` (path-to-SHA-256 JSON) | Draft paths and static authoring checks pass |
-| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract and the actual plan schema | `test-plan.json`, `acceptance-plan.json`, `plan-controls/{development,acceptance}.json`, `plan-reviews/{development,acceptance}.json`, `oracle.lock.json` (JSON) | Schema v2 validates every required field and enum; full positive/negative/auxiliary controls run; assets and requirement sources are audited; each suite has an independent review; only then can the plan gate pass |
+| Refinement: planning | Immutable Skill snapshot, requirements, auto-discovered project standards, additional standards, analysis contract and the actual plan schema | `test-plan.json`, `acceptance-plan.json`, `plan-controls/{development,acceptance}.json`, `plan-reviews/{development,acceptance}.json`, `oracle.lock.json` (JSON) | Current plan/v3 schema validates atomic criteria, detailed scenario links and every required field/enum; historical plan/v2 remains readable for verified resume; full positive/negative/auxiliary controls run; assets and requirement sources are audited; each suite has an independent review; only then can the plan gate pass |
 | Refinement: baseline | Locked development plan and original Skill snapshot | `baseline/summary.json`, `baseline/standards.json` (JSON), backend logs/evidence | All configured engines return observed results; environment errors stop repair |
 | Repair | Failed-case results (including immutable per-attempt acceptance summaries after held-out failure), material standards findings, frozen requirements, prioritized source excerpts | `iterations/round-N/changes.json` (JSON), candidate Skill files, call request/response manifests | Each changed file cites a failed case or finding; protected tests and oracles cannot be edited |
 | Regression | Candidate, same frozen development suite, original passing-case set | `iterations/round-N/regression/summary.json`, `standards.json`, engine comparisons (JSON/Markdown) | No previously passing case regresses; each engine is judged separately |

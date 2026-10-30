@@ -66,7 +66,61 @@ NEGATIVE_CONTROL = {
         "rationale": {"type": "string", "minLength": 12},
     },
 }
-CASE = {
+ACCEPTANCE_CRITERION = {
+    "type": "object", "additionalProperties": False,
+    "required": ["id", "statement", "evidence"],
+    "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "statement": {"type": "string", "minLength": 8},
+        "evidence": {"type": "string", "minLength": 8},
+    },
+}
+REQUIREMENTS = {"type": "array", "minItems": 1, "items": {
+    "type": "object", "additionalProperties": False,
+    "required": ["id", "behavior", "source", "required", "acceptance_criteria"],
+    "properties": {"id": {"type": "string"}, "behavior": {"type": "string", "minLength": 8},
+                   "source": {"type": "string", "minLength": 3}, "required": {"type": "boolean"},
+                   "acceptance_criteria": {"type": "array", "minItems": 1,
+                                           "items": ACCEPTANCE_CRITERION}},
+}}
+RISK_DIMENSIONS = ["input_variation", "workflow_state", "role_permission", "dependency_failure",
+                   "cross_requirement", "side_effect", "retry_recovery", "idempotency",
+                   "ambiguity_conflict", "asset_handling", "safety_boundary", "other"]
+SCENARIO_DETAIL = {
+    "type": "object", "additionalProperties": False,
+    "required": ["title", "preconditions", "stimulus", "actions", "expected_observables",
+                 "forbidden_outcomes", "risk_dimensions", "basis"],
+    "properties": {
+        "title": {"type": "string", "minLength": 8},
+        "preconditions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+        "stimulus": {"type": "string", "minLength": 8},
+        "actions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 3}},
+        "expected_observables": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}},
+        "forbidden_outcomes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 5}},
+        "risk_dimensions": {"type": "array", "minItems": 1, "uniqueItems": True,
+                            "items": {"enum": RISK_DIMENSIONS}},
+        "basis": {"type": "string", "minLength": 12},
+    },
+}
+SCENARIO_INTENT = {
+    "type": "object", "additionalProperties": False,
+    "required": ["id", "kind", "applicable", "situation", "requirement_ids",
+                 "acceptance_criteria_ids", "detail", "basis", "exclusion_reason"],
+    "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "kind": {"enum": ["normal", "boundary", "error", "negative", "regression"]},
+        "applicable": {"type": "boolean"}, "situation": {"type": "string", "minLength": 8},
+        "requirement_ids": {"type": "array", "minItems": 1, "uniqueItems": True,
+                            "items": {"type": "string"}},
+        "acceptance_criteria_ids": {"type": "array", "minItems": 1, "uniqueItems": True,
+                                    "items": {"type": "string"}},
+        "detail": SCENARIO_DETAIL, "basis": {"type": "string", "minLength": 12},
+        "exclusion_reason": {"type": "string"},
+    },
+    "allOf": [{"if": {"properties": {"applicable": {"const": False}}},
+               "then": {"properties": {"exclusion_reason": {"type": "string", "minLength": 12}}}}],
+}
+CASE_V2 = {
     "type": "object", "additionalProperties": False,
     "required": ["id", "requirement_ids", "kind", "scenario", "expected_outcome", "prompt", "files", "checks",
                  "helpers", "asset_audit", "positive_controls", "negative_controls",
@@ -90,7 +144,16 @@ CASE = {
         "bad_response": {"type": "string"},
     },
 }
-PLAN = {
+CASE = {
+    **CASE_V2,
+    "required": CASE_V2["required"] + ["scenario_id", "acceptance_criteria_ids", "scenario_detail"],
+    "properties": {**CASE_V2["properties"],
+                    "scenario_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+                    "acceptance_criteria_ids": {"type": "array", "minItems": 1, "uniqueItems": True,
+                                                "items": {"type": "string"}},
+                    "scenario_detail": SCENARIO_DETAIL},
+}
+PLAN_V2 = {
     "type": "object", "additionalProperties": False,
     "required": ["schema_version", "requirements", "cases", "coverage_gaps", "assumptions"],
     "properties": {
@@ -106,6 +169,17 @@ PLAN = {
         "assumptions": {"type": "array", "items": {"type": "string"}},
     },
 }
+PLAN = {
+    "type": "object", "additionalProperties": False,
+    "required": ["schema_version", "requirements", "cases", "coverage_gaps", "assumptions"],
+    "properties": {
+        "schema_version": {"const": "skill-refiner.plan/v3"},
+        "requirements": REQUIREMENTS,
+        "cases": {"type": "array", "minItems": 2, "items": CASE},
+        "coverage_gaps": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+    },
+}
 REVIEW = {
     "type": "object", "additionalProperties": False,
     "required": ["approved", "issues"],
@@ -114,7 +188,7 @@ REVIEW = {
                "then": {"properties": {"issues": {"minItems": 1}}},
                "else": {"properties": {"issues": {"maxItems": 0}}}}],
 }
-PLAN_REVIEW = {
+PLAN_REVIEW_V2 = {
     **REVIEW,
     "required": ["approved", "issues", "case_contracts"],
     "properties": {**REVIEW["properties"], "case_contracts": {
@@ -141,6 +215,19 @@ PLAN_REVIEW = {
                            "negative_controls_targeted": {"type": "boolean"},
                            "basis": {"type": "string", "minLength": 12}},
         },
+    }},
+}
+PLAN_REVIEW = {
+    **PLAN_REVIEW_V2,
+    "properties": {**PLAN_REVIEW_V2["properties"], "case_contracts": {
+        **PLAN_REVIEW_V2["properties"]["case_contracts"],
+        "items": {**PLAN_REVIEW_V2["properties"]["case_contracts"]["items"],
+                  "required": PLAN_REVIEW_V2["properties"]["case_contracts"]["items"]["required"] +
+                  ["acceptance_criteria_traceable", "scenario_detail_complete", "risk_coverage_complete"],
+                  "properties": {**PLAN_REVIEW_V2["properties"]["case_contracts"]["items"]["properties"],
+                                 "acceptance_criteria_traceable": {"type": "boolean"},
+                                 "scenario_detail_complete": {"type": "boolean"},
+                                 "risk_coverage_complete": {"type": "boolean"}}},
     }},
 }
 REPAIR = {
